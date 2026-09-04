@@ -6,22 +6,24 @@ import (
 	"github.com/tidwall/gjson"
 )
 
-// GetGJSONBytesNoCopy returns a GJSON result that may reference data directly.
-// Callers must not retain the result or mutate data while using it.
-func GetGJSONBytesNoCopy(data []byte, path string) gjson.Result {
-	if len(data) == 0 {
-		return gjson.Result{}
-	}
-	return gjson.Get(unsafe.String(unsafe.SliceData(data), len(data)), path)
-}
-
-// ParseGJSONBytesNoCopy parses data into a GJSON result that references data
-// directly. gjson.ParseBytes copies the whole document, which is prohibitive
-// for multi-megabyte payloads. Callers must not retain the result or mutate
-// data while using it.
+// ParseGJSONBytesNoCopy parses a JSON byte slice into a GJSON result without copying
+// the underlying bytes.
+//
+// The input bytes must remain valid and unmodified for the result's lifetime.
+// Callers must treat returned results as read-only views into the backing slice.
 func ParseGJSONBytesNoCopy(data []byte) gjson.Result {
 	if len(data) == 0 {
 		return gjson.Result{}
 	}
 	return gjson.Parse(unsafe.String(unsafe.SliceData(data), len(data)))
+}
+
+// GetGJSONBytesNoCopy returns a GJSON result that may reference data directly.
+// The input bytes must remain valid and unmodified for the result's lifetime.
+// Callers must use the returned result read-only and not mutate the backing bytes.
+func GetGJSONBytesNoCopy(data []byte, path string) gjson.Result {
+	if len(data) == 0 {
+		return gjson.Result{}
+	}
+	return gjson.Get(unsafe.String(unsafe.SliceData(data), len(data)), path)
 }
