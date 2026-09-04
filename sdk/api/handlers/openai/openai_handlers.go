@@ -7,9 +7,11 @@
 package openai
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"sync"
 
@@ -17,8 +19,8 @@ import (
 	. "github.com/router-for-me/CLIProxyAPI/v7/internal/constant"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
-	responsesconverter "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/openai/openai/responses"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/oagmsg"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -122,7 +124,7 @@ func (h *OpenAIAPIHandler) ChatCompletions(c *gin.Context) {
 	// Convert them to Chat Completions so downstream translators preserve tool metadata.
 	if shouldTreatAsResponsesFormat(rawJSON) {
 		modelName := gjson.GetBytes(rawJSON, "model").String()
-		rawJSON = responsesconverter.ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName, rawJSON, stream)
+		rawJSON = oagmsg.TranslateRequest(oagmsg.FormatOpenAIResponse, oagmsg.FormatOpenAI, modelName, rawJSON, stream)
 		stream = gjson.GetBytes(rawJSON, "stream").Bool()
 	}
 
@@ -525,7 +527,7 @@ func (h *OpenAIAPIHandler) handleStreamingResponse(c *gin.Context, rawJSON []byt
 			setSSEHeaders()
 			handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
 
-			_, _ = fmt.Fprintf(c.Writer, "data: %s\n\n", string(chunk))
+			writeOpenAIChatStreamChunk(c.Writer, chunk)
 			flusher.Flush()
 
 			// Continue streaming the rest
@@ -686,7 +688,7 @@ func (h *OpenAIAPIHandler) handleCompletionsStreamingResponse(c *gin.Context, ra
 func (h *OpenAIAPIHandler) handleStreamResult(c *gin.Context, flusher http.Flusher, cancel func(error), data <-chan []byte, errs <-chan *interfaces.ErrorMessage) {
 	h.ForwardStream(c, flusher, cancel, data, errs, handlers.StreamForwardOptions{
 		WriteChunk: func(chunk []byte) {
-			_, _ = fmt.Fprintf(c.Writer, "data: %s\n\n", string(chunk))
+			writeOpenAIChatStreamChunk(c.Writer, chunk)
 		},
 		WriteTerminalError: func(errMsg *interfaces.ErrorMessage) {
 			if errMsg == nil {
@@ -707,4 +709,30 @@ func (h *OpenAIAPIHandler) handleStreamResult(c *gin.Context, flusher http.Flush
 			_, _ = fmt.Fprint(c.Writer, "data: [DONE]\n\n")
 		},
 	})
+}
+
+func writeOpenAIChatStreamChunk(w io.Writer, chunk []byte) {
+	payload := openAIChatStreamPayload(chunk)
+	if bytes.Equal(payload, []byte("[DONE]")) {
+		return
+	}
+	_, _ = fmt.Fprintf(w, "data: %s\n\n", payload)
+}
+
+func openAIChatStreamPayload(chunk []byte) []byte {
+	trimmed := bytes.TrimSpace(chunk)
+	if !bytes.Contains(trimmed, []byte("data:")) {
+		return trimmed
+	}
+	var dataLines [][]byte
+	for _, line := range bytes.Split(trimmed, []byte("\n")) {
+		line = bytes.TrimSpace(line)
+		if bytes.HasPrefix(line, []byte("data:")) {
+			dataLines = append(dataLines, bytes.TrimSpace(line[len("data:"):]))
+		}
+	}
+	if len(dataLines) == 0 {
+		return trimmed
+	}
+	return bytes.Join(dataLines, []byte("\n"))
 }

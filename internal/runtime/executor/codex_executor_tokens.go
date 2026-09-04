@@ -9,6 +9,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/oagmsg"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -18,24 +19,10 @@ import (
 func (e *CodexExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 
-	from := opts.SourceFormat
-	responseFormat := cliproxyexecutor.ResponseFormatOrSource(opts)
-	to := sdktranslator.FromString("codex")
-	body := helps.TranslateRequestWithAPIKeyModelCompatibility(ctx, opts.Headers, e.cfg, from, to, baseModel, req.Payload, false, helps.APIKeyModelIsCompat(req))
-
-	body, err := helps.ApplyRequestThinking(body, req, opts, from.String(), to.String(), e.Identifier())
+	body, responseFormat, err := e.buildCodexTokenCountBody(ctx, req, opts, baseModel)
 	if err != nil {
 		return cliproxyexecutor.Response{}, err
 	}
-
-	body = helps.SetStringIfDifferent(body, "model", baseModel)
-	body, _ = sjson.DeleteBytes(body, "previous_response_id")
-	body, _ = sjson.DeleteBytes(body, "generate")
-	body, _ = sjson.DeleteBytes(body, "prompt_cache_retention")
-	body, _ = sjson.DeleteBytes(body, "safety_identifier")
-	body, _ = sjson.DeleteBytes(body, "stream_options")
-	body = helps.SetBoolIfDifferent(body, "stream", false)
-	body = normalizeCodexInstructions(body)
 
 	enc, err := tokenizerForCodexModel(baseModel)
 	if err != nil {
@@ -48,8 +35,33 @@ func (e *CodexExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth
 	}
 
 	usageJSON := fmt.Sprintf(`{"response":{"usage":{"input_tokens":%d,"output_tokens":0,"total_tokens":%d}}}`, count, count)
-	translated := sdktranslator.TranslateTokenCount(ctx, to, responseFormat, count, []byte(usageJSON))
+	translated := oagmsg.TranslateTokenCount(ctx, sdktranslator.FromString("codex"), responseFormat, count, []byte(usageJSON))
 	return cliproxyexecutor.Response{Payload: translated}, nil
+}
+
+func (e *CodexExecutor) buildCodexTokenCountBody(ctx context.Context, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, baseModel string) ([]byte, sdktranslator.Format, error) {
+	from := opts.SourceFormat
+	responseFormat := cliproxyexecutor.ResponseFormatOrSource(opts)
+	to := sdktranslator.FromString("codex")
+	body := helps.TranslateRequestWithAPIKeyModelCompatibility(ctx, opts.Headers, e.cfg, from, to, baseModel, req.Payload, false, helps.APIKeyModelIsCompat(req))
+
+	body, err := helps.ApplyRequestThinking(body, req, opts, from.String(), to.String(), e.Identifier())
+	if err != nil {
+		return nil, responseFormat, err
+	}
+
+	body = helps.SetStringIfDifferent(body, "model", baseModel)
+	body, _ = sjson.DeleteBytes(body, "previous_response_id")
+	body, _ = sjson.DeleteBytes(body, "generate")
+	body, _ = sjson.DeleteBytes(body, "prompt_cache_retention")
+	body, _ = sjson.DeleteBytes(body, "safety_identifier")
+	body, _ = sjson.DeleteBytes(body, "stream_options")
+	body = helps.SetBoolIfDifferent(body, "stream", false)
+	body, _ = sjson.DeleteBytes(body, "store")
+	body, _ = sjson.DeleteBytes(body, "include")
+	body, _ = sjson.DeleteBytes(body, "parallel_tool_calls")
+	body = normalizeCodexInstructions(body)
+	return body, responseFormat, nil
 }
 
 func tokenizerForCodexModel(model string) (tokenizer.Codec, error) {

@@ -402,6 +402,43 @@ func TestKimiThinkingReplayUnknownStreamDeltaPreservesPreviousCache(t *testing.T
 	}
 }
 
+func TestKimiThinkingReplayStreamErrorClearsAppliedReplay(t *testing.T) {
+	internalcache.ClearKimiThinkingReplayCache()
+	t.Cleanup(internalcache.ClearKimiThinkingReplayCache)
+
+	const sessionID = "stream-error-clears"
+	const sessionKey = "execution:" + sessionID
+	cached := []byte(`[{"type":"thinking","thinking":"reasoning","signature":"kimi-signature"},{"type":"tool_use","id":"toolu_1","name":"Read","input":{"path":"README.md"}}]`)
+	if !internalcache.CacheKimiThinkingReplayBestEffort(context.Background(), "k3", sessionKey, cached) {
+		t.Fatal("failed to seed replay cache")
+	}
+	payload := []byte(`{"model":"kimi-k3","messages":[{"role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"Read","input":{"path":"README.md"}}]}]}`)
+	opts := cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatClaude,
+		Metadata: map[string]any{
+			cliproxyexecutor.ExecutionSessionMetadataKey: sessionID,
+		},
+	}
+	_, scope := prepareKimiThinkingReplayRequest(context.Background(), cliproxyexecutor.Request{Model: "kimi-k3", Payload: payload}, opts)
+	if !scope.replayApplied {
+		t.Fatal("expected seeded replay to be applied")
+	}
+
+	chunks := make(chan cliproxyexecutor.StreamChunk, 1)
+	chunks <- cliproxyexecutor.StreamChunk{Payload: []byte(
+		"event: message_start\n" +
+			`data: {"type":"message_start","message":{"id":"msg_1","model":"k3"}}` + "\n\n" +
+			"event: error\n" +
+			`data: {"type":"error","error":{"type":"invalid_request_error","message":"invalid thinking signature"}}` + "\n\n",
+	)}
+	close(chunks)
+	consumeKimiReplayStream(t, wrapKimiThinkingReplayStream(context.Background(), &cliproxyexecutor.StreamResult{Chunks: chunks}, scope))
+
+	if got, found, errGet := internalcache.GetKimiThinkingReplayRequired(context.Background(), "k3", sessionKey); errGet != nil || found || got != nil {
+		t.Fatalf("stream error replay remained cached: got %s, found %v, error %v", got, found, errGet)
+	}
+}
+
 func consumeKimiReplayStream(t *testing.T, result *cliproxyexecutor.StreamResult) {
 	t.Helper()
 	if result == nil {

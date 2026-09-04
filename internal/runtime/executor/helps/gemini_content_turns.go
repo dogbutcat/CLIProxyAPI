@@ -1,7 +1,6 @@
 package helps
 
 import (
-	translatorcommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/common"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -31,7 +30,7 @@ func EnsureGeminiLeadingUserContent(payload []byte, path string) []byte {
 		contentItems = append(contentItems, []byte(content.Raw))
 	}
 
-	out, errSet := sjson.SetRawBytes(payload, path, translatorcommon.JoinRawArray(contentItems))
+	out, errSet := sjson.SetRawBytes(payload, path, joinRawJSONArray(contentItems))
 	if errSet != nil {
 		return payload
 	}
@@ -44,7 +43,7 @@ func contentHasFunctionResponse(content gjson.Result) bool {
 		return false
 	}
 	for _, part := range parts.Array() {
-		if part.Get("functionResponse").Exists() {
+		if part.Get("functionResponse").Exists() || part.Get("function_response").Exists() {
 			return true
 		}
 	}
@@ -76,7 +75,7 @@ func EnsureGeminiTrailingUserContent(payload []byte, path string) []byte {
 	}
 	contentItems = append(contentItems, emptyGeminiUserTurnJSON)
 
-	out, errSet := sjson.SetRawBytes(payload, path, translatorcommon.JoinRawArray(contentItems))
+	out, errSet := sjson.SetRawBytes(payload, path, joinRawJSONArray(contentItems))
 	if errSet != nil {
 		return payload
 	}
@@ -88,4 +87,28 @@ func EnsureGeminiTrailingUserContent(payload []byte, path string) []byte {
 func EnsureGeminiBoundaryUserContent(payload []byte, path string) []byte {
 	payload = EnsureGeminiLeadingUserContent(payload, path)
 	return EnsureGeminiTrailingUserContent(payload, path)
+}
+
+func joinRawJSONArray(items [][]byte) []byte {
+	out := make([]byte, 0, rawJSONArraySize(items))
+	out = append(out, '[')
+	for idx, item := range items {
+		if idx > 0 {
+			out = append(out, ',')
+		}
+		out = append(out, item...)
+	}
+	out = append(out, ']')
+	return out
+}
+
+func rawJSONArraySize(items [][]byte) int {
+	size := 2
+	if len(items) > 1 {
+		size += len(items) - 1
+	}
+	for _, item := range items {
+		size += len(item)
+	}
+	return size
 }

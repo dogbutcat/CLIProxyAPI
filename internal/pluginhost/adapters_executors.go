@@ -16,6 +16,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/oagmsg"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 )
@@ -411,7 +412,7 @@ func (a *executorAdapter) prepareExecutorCall(req coreexecutor.Request, opts cor
 	nativeReq := req
 	nativeOpts := opts
 	if inputRequested != "" && inputRequested != inputFormat {
-		nativeReq.Payload = sdktranslator.TranslateRequest(inputRequested, inputFormat, req.Model, req.Payload, opts.Stream)
+		nativeReq.Payload = oagmsg.TranslateRequest(inputRequested, inputFormat, req.Model, req.Payload, opts.Stream)
 	}
 	nativeReq.Format = outputFormat
 	nativeOpts.SourceFormat = inputFormat
@@ -467,7 +468,7 @@ func (a *executorAdapter) selectExecutorInputFormat(requested sdktranslator.Form
 		return requested, nil
 	}
 	for _, format := range a.inputFormats {
-		if requested == "" || sdktranslator.HasRequestTransformer(requested, format) {
+		if requested == "" || oagmsg.HasRequestTransformer(requested, format) {
 			return format, nil
 		}
 	}
@@ -496,7 +497,7 @@ func (a *executorAdapter) executorResponseTranslationAvailable(from, to sdktrans
 	if from == "" || to == "" || from == to {
 		return true
 	}
-	if sdktranslator.HasResponseTransformer(to, from) {
+	if oagmsg.HasResponseTransformer(from, to) {
 		return true
 	}
 	return a != nil && a.host.hasResponseTranslator()
@@ -516,7 +517,7 @@ func executorNativeStreamResponseTranslatorExists(from, to sdktranslator.Format)
 	if from == "" || to == "" || from == to {
 		return true
 	}
-	return sdktranslator.HasStreamResponseTransformer(to, from)
+	return oagmsg.HasStreamResponseTransformer(from, to)
 }
 
 func (a *executorAdapter) translateExecutorResponse(ctx context.Context, prepared preparedExecutorCall, payload []byte, stream bool, param *any) []byte {
@@ -541,7 +542,7 @@ func (a *executorAdapter) translateExecutorResponse(ctx context.Context, prepare
 		}
 		return bytes.Join(frames, nil)
 	}
-	out := sdktranslator.TranslateNonStream(ctx, prepared.outputFormat, prepared.requestedFormat, prepared.req.Model, originalRequest, prepared.req.Payload, payload, param)
+	out := oagmsg.TranslateNonStream(ctx, prepared.outputFormat, prepared.requestedFormat, prepared.req.Model, originalRequest, prepared.req.Payload, payload, param)
 	if prepared.requestedFormat == sdktranslator.FormatOpenAIResponse {
 		out = helps.EnsureResponsesUsageDetails(out)
 	}
@@ -599,7 +600,7 @@ func (a *executorAdapter) translateExecutorStreamPayload(ctx context.Context, pr
 	if len(originalRequest) == 0 {
 		originalRequest = prepared.req.Payload
 	}
-	frames := sdktranslator.TranslateStream(ctx, prepared.outputFormat, prepared.requestedFormat, prepared.req.Model, originalRequest, prepared.req.Payload, payload, param)
+	frames := oagmsg.TranslateStream(ctx, prepared.outputFormat, prepared.requestedFormat, prepared.req.Model, originalRequest, prepared.req.Payload, payload, param)
 	if executorStreamTranslationFellBack(prepared, payload, frames) {
 		return nil
 	}

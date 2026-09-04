@@ -1159,7 +1159,7 @@ func TestPruneXAIOrphanedToolChoice(t *testing.T) {
 	}
 }
 
-func TestXAISupportsNativeImageGeneration(t *testing.T) {
+func TestXAINativeImageGenerationModelSupport(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
@@ -1186,8 +1186,11 @@ func TestXAISupportsNativeImageGeneration(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.model, func(t *testing.T) {
 			t.Parallel()
-			if got := xaiSupportsNativeImageGeneration(tt.model); got != tt.want {
-				t.Fatalf("xaiSupportsNativeImageGeneration(%q) = %t, want %t", tt.model, got, tt.want)
+			body := []byte(fmt.Sprintf(`{"model":%q,"tools":[{"type":"image_generation"}]}`, tt.model))
+			out := normalizeXAITools(body)
+			got := gjson.GetBytes(out, `tools.#(type=="image_generation")`).Exists()
+			if got != tt.want {
+				t.Fatalf("native image_generation support for %q = %t, want %t; body=%s", tt.model, got, tt.want, out)
 			}
 		})
 	}
@@ -1982,6 +1985,7 @@ func TestXAIExecutorExecuteStreamPreservesClientSameNameToolsWithXSearch(t *test
 		_, _ = fmt.Fprintf(w, "event: response.output_item.done\ndata: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"id\":\"ctc_1\",\"type\":\"custom_tool_call\",\"call_id\":\"xs_call-1\",\"name\":\"x_keyword_search\",\"input\":\"{}\",\"status\":\"completed\"}}\n\n")
 		_, _ = fmt.Fprintf(w, "event: response.output_item.done\ndata: {\"type\":\"response.output_item.done\",\"output_index\":1,\"item\":{\"id\":\"fc_ns\",\"type\":\"function_call\",\"call_id\":\"call_ns\",\"name\":\"acme__x_keyword_search\",\"arguments\":\"{}\",\"status\":\"completed\"}}\n\n")
 		_, _ = fmt.Fprintf(w, "event: response.output_item.done\ndata: {\"type\":\"response.output_item.done\",\"output_index\":2,\"item\":{\"id\":\"fc_plain\",\"type\":\"function_call\",\"call_id\":\"call_plain\",\"name\":\"x_keyword_search\",\"arguments\":\"{}\",\"status\":\"completed\"}}\n\n")
+		_, _ = fmt.Fprintf(w, "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"answer\"}\n\n")
 		_, _ = fmt.Fprintf(w, "event: response.output_item.done\ndata: {\"type\":\"response.output_item.done\",\"output_index\":3,\"item\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"answer\"}],\"status\":\"completed\"}}\n\n")
 		completed := `{"type":"response.completed","response":{"id":"resp_1","object":"response","status":"completed","output":[{"id":"ctc_1","type":"custom_tool_call","call_id":"xs_call-1","name":"x_keyword_search","input":"{}"},{"id":"fc_ns","type":"function_call","call_id":"call_ns","name":"acme__x_keyword_search","arguments":"{}"},{"id":"fc_plain","type":"function_call","call_id":"call_plain","name":"x_keyword_search","arguments":"{}"},{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"output_text","text":"answer"}]}]}}`
 		_, _ = fmt.Fprintf(w, "event: response.completed\ndata: %s\n\n", completed)
@@ -2161,25 +2165,19 @@ func TestXAIExecutorExecutePreservesNormalizedCustomSameNameToolWithXSearch(t *t
 	if strings.Contains(payload, "xs_call") {
 		t.Fatalf("internal X search call_id leaked into response: %s", payload)
 	}
-	if strings.Contains(payload, "custom_tool_call") {
-		t.Fatalf("internal custom_tool_call leaked into response: %s", payload)
-	}
 	if got := gjson.GetBytes(resp.Payload, "output.#").Int(); got != 2 {
 		t.Fatalf("response output length = %d, want 2; payload=%s", got, payload)
 	}
-	var foundClientFunction bool
+	var foundClientCustom bool
 	for _, item := range gjson.GetBytes(resp.Payload, "output").Array() {
-		if item.Get("type").String() == "function_call" &&
+		if item.Get("type").String() == "custom_tool_call" &&
 			item.Get("name").String() == "x_keyword_search" &&
 			item.Get("call_id").String() == "call_custom" {
-			foundClientFunction = true
-		}
-		if item.Get("type").String() == "custom_tool_call" {
-			t.Fatalf("internal custom_tool_call should have been filtered: %s", item.Raw)
+			foundClientCustom = true
 		}
 	}
-	if !foundClientFunction {
-		t.Fatalf("normalized client custom tool function_call missing from response: %s", payload)
+	if !foundClientCustom {
+		t.Fatalf("restored client custom tool missing from response: %s", payload)
 	}
 }
 
@@ -2196,6 +2194,7 @@ func TestXAIExecutorExecuteStreamPreservesNormalizedCustomSameNameToolWithXSearc
 		w.Header().Set("Content-Type", "text/event-stream")
 		_, _ = fmt.Fprintf(w, "event: response.output_item.done\ndata: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"id\":\"ctc_1\",\"type\":\"custom_tool_call\",\"call_id\":\"xs_call-1\",\"name\":\"x_keyword_search\",\"input\":\"{}\",\"status\":\"completed\"}}\n\n")
 		_, _ = fmt.Fprintf(w, "event: response.output_item.done\ndata: {\"type\":\"response.output_item.done\",\"output_index\":1,\"item\":{\"id\":\"fc_custom\",\"type\":\"function_call\",\"call_id\":\"call_custom\",\"name\":\"x_keyword_search\",\"arguments\":\"{}\",\"status\":\"completed\"}}\n\n")
+		_, _ = fmt.Fprintf(w, "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"answer\"}\n\n")
 		_, _ = fmt.Fprintf(w, "event: response.output_item.done\ndata: {\"type\":\"response.output_item.done\",\"output_index\":2,\"item\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"answer\"}],\"status\":\"completed\"}}\n\n")
 		completed := `{"type":"response.completed","response":{"id":"resp_1","object":"response","status":"completed","output":[{"id":"ctc_1","type":"custom_tool_call","call_id":"xs_call-1","name":"x_keyword_search","input":"{}"},{"id":"fc_custom","type":"function_call","call_id":"call_custom","name":"x_keyword_search","arguments":"{}"},{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"output_text","text":"answer"}]}]}}`
 		_, _ = fmt.Fprintf(w, "event: response.completed\ndata: %s\n\n", completed)
@@ -2259,11 +2258,8 @@ func TestXAIExecutorExecuteStreamPreservesNormalizedCustomSameNameToolWithXSearc
 	if strings.Contains(streamText, "xs_call") {
 		t.Fatalf("internal X search call_id leaked downstream: %s", streamText)
 	}
-	if strings.Contains(streamText, "custom_tool_call") {
-		t.Fatalf("internal custom_tool_call leaked downstream: %s", streamText)
-	}
 
-	var foundClientFunction bool
+	var foundClientCustom bool
 	var completed gjson.Result
 	for _, line := range strings.Split(streamText, "\n") {
 		line = strings.TrimSpace(strings.TrimPrefix(line, "data:"))
@@ -2278,34 +2274,28 @@ func TestXAIExecutorExecuteStreamPreservesNormalizedCustomSameNameToolWithXSearc
 		if !item.Exists() {
 			continue
 		}
-		if item.Get("type").String() == "custom_tool_call" {
-			t.Fatalf("internal custom_tool_call leaked in stream item: %s", item.Raw)
-		}
-		if item.Get("type").String() == "function_call" &&
+		if item.Get("type").String() == "custom_tool_call" &&
 			item.Get("name").String() == "x_keyword_search" &&
 			item.Get("call_id").String() == "call_custom" {
-			foundClientFunction = true
+			foundClientCustom = true
 		}
 	}
-	if !foundClientFunction {
-		t.Fatalf("normalized client custom tool function_call missing from SSE stream: %s", streamText)
+	if !foundClientCustom {
+		t.Fatalf("restored client custom tool missing from SSE stream: %s", streamText)
 	}
 	if got := completed.Get("response.output.#").Int(); got != 2 {
 		t.Fatalf("completed output length = %d, want 2; completed=%s", got, completed.Raw)
 	}
-	if completed.Get(`response.output.#(type=="custom_tool_call")`).Exists() {
-		t.Fatalf("internal custom_tool_call present in completed output: %s", completed.Raw)
-	}
-	var completedClientFunction bool
+	var completedClientCustom bool
 	for _, item := range completed.Get("response.output").Array() {
-		if item.Get("type").String() == "function_call" &&
+		if item.Get("type").String() == "custom_tool_call" &&
 			item.Get("name").String() == "x_keyword_search" &&
 			item.Get("call_id").String() == "call_custom" {
-			completedClientFunction = true
+			completedClientCustom = true
 		}
 	}
-	if !completedClientFunction {
-		t.Fatalf("completed output missing normalized client custom tool function_call: %s", completed.Raw)
+	if !completedClientCustom {
+		t.Fatalf("completed output missing restored client custom tool: %s", completed.Raw)
 	}
 }
 

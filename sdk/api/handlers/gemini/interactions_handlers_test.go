@@ -230,7 +230,7 @@ func TestInteractionsAgentUsesNativeInteractionsEndpoint(t *testing.T) {
 	}
 }
 
-func TestInteractionsAntigravityModelUsesTranslatorBridge(t *testing.T) {
+func TestInteractionsAntigravityModelUsesDirectOAGMsgConversion(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	model := "interactions-antigravity-bridge-model"
 	var upstreamBody []byte

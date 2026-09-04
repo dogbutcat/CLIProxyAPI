@@ -5,12 +5,15 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
+	"github.com/tidwall/gjson"
 )
 
 func TestResolveAntigravityRequestBaseURL(t *testing.T) {
@@ -189,6 +192,90 @@ func TestAntigravityBuildRequestUsesDerivedSessionIDAndPreservesExplicit(t *test
 	}
 	if got := explicitRequest["sessionId"]; got != "-987654321" {
 		t.Fatalf("explicit request.sessionId = %v, want -987654321", got)
+	}
+}
+
+func TestAntigravityBuildRequestFinalizesNonStreamOptions(t *testing.T) {
+	t.Parallel()
+
+	executor := &AntigravityExecutor{}
+	auth := &cliproxyauth.Auth{Metadata: map[string]any{"project_id": "project-1"}}
+	payload := []byte(`{
+		"request": {
+			"contents": [{"role":"user","parts":[{"text":"hello"}]}],
+			"stream_options": {"include_usage": true}
+		},
+		"stream_options": {"include_usage": true}
+	}`)
+	req, err := executor.buildRequest(context.Background(), auth, "token", "gpt-oss-120b-medium", payload, false, "", "https://example.com", "-123456789")
+	if err != nil {
+		t.Fatalf("buildRequest error: %v", err)
+	}
+	body := requestBody(t, req)
+	if _, ok := body["stream_options"]; ok {
+		t.Fatalf("top-level stream_options should be removed: %v", body)
+	}
+	request, ok := body["request"].(map[string]any)
+	if !ok {
+		t.Fatalf("request missing or invalid: %v", body["request"])
+	}
+	if _, ok := request["stream_options"]; ok {
+		t.Fatalf("request.stream_options should be removed: %v", request)
+	}
+}
+
+func TestAntigravityExecuteGPTOSSNonStreamUsesStreamEndpoint(t *testing.T) {
+	var gotBody []byte
+	var gotPath string
+	var gotRawQuery string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotRawQuery = r.URL.RawQuery
+		var errRead error
+		gotBody, errRead = io.ReadAll(r.Body)
+		if errRead != nil {
+			t.Fatalf("read upstream request body: %v", errRead)
+		}
+		if errClose := r.Body.Close(); errClose != nil {
+			t.Fatalf("close upstream request body: %v", errClose)
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, `data: {"response":{"responseId":"resp-1","modelVersion":"gpt-oss-120b-medium","candidates":[{"content":{"role":"model","parts":[{"text":"ok"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":1,"candidatesTokenCount":1,"totalTokenCount":2}},"traceId":"trace-1"}`+"\n\n")
+	}))
+	defer server.Close()
+
+	executor := NewAntigravityExecutor(nil)
+	auth := &cliproxyauth.Auth{
+		ID:         "antigravity-payload-finalizer",
+		Provider:   "antigravity",
+		Attributes: map[string]string{"base_url": server.URL},
+		Metadata: map[string]any{
+			"access_token": "token",
+			"project_id":   "project-1",
+			"expired":      time.Now().Add(time.Hour).Format(time.RFC3339),
+		},
+	}
+	payload := []byte(`{"model":"gpt-oss-120b-medium","messages":[{"role":"user","content":"hi"}]}`)
+	resp, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "gpt-oss-120b-medium",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat:    sdktranslator.FormatOpenAI,
+		ResponseFormat:  sdktranslator.FormatOpenAI,
+		Stream:          false,
+		OriginalRequest: payload,
+	})
+	if err != nil {
+		t.Fatalf("Execute error: %v", err)
+	}
+	if gotPath != antigravityStreamPath || gotRawQuery != "alt=sse" {
+		t.Fatalf("upstream route = %s?%s, want %s?alt=sse", gotPath, gotRawQuery, antigravityStreamPath)
+	}
+	if gjson.GetBytes(gotBody, "stream_options").Exists() || gjson.GetBytes(gotBody, "request.stream_options").Exists() {
+		t.Fatalf("non-stream upstream body kept stream_options: %s", string(gotBody))
+	}
+	if got := gjson.GetBytes(resp.Payload, "choices.0.message.content").String(); got != "ok" {
+		t.Fatalf("response content = %q, want ok; body=%s", got, string(resp.Payload))
 	}
 }
 

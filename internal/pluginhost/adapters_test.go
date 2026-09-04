@@ -19,6 +19,7 @@ import (
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	coreusage "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/oagmsg"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginabi"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
@@ -79,29 +80,12 @@ func TestPluginModelInfoToRegistryModelInfoClonesThinkingAndSlices(t *testing.T)
 	}
 }
 
-func TestExecutorNativeStreamResponseTranslatorExistsRequiresStreamTransform(t *testing.T) {
-	outputFormat := sdktranslator.Format("plugin-output-non-stream-only")
-	requestedFormat := sdktranslator.Format("client-output-non-stream-only")
-	sdktranslator.Register(requestedFormat, outputFormat, nil, sdktranslator.ResponseTransform{
-		NonStream: func(ctx context.Context, model string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, param *any) []byte {
-			return rawJSON
-		},
-	})
-
-	if executorNativeStreamResponseTranslatorExists(outputFormat, requestedFormat) {
-		t.Fatal("non-stream-only response transformer was accepted for stream executor output")
+func TestExecutorNativeStreamResponseTranslatorExistsUsesOAGMsgFormats(t *testing.T) {
+	if !executorNativeStreamResponseTranslatorExists(sdktranslator.FormatClaude, sdktranslator.FormatOpenAI) {
+		t.Fatal("native oagmsg stream conversion was not accepted")
 	}
-
-	streamOutputFormat := sdktranslator.Format("plugin-output-stream")
-	streamRequestedFormat := sdktranslator.Format("client-output-stream")
-	sdktranslator.Register(streamRequestedFormat, streamOutputFormat, nil, sdktranslator.ResponseTransform{
-		Stream: func(ctx context.Context, model string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, param *any) [][]byte {
-			return [][]byte{rawJSON}
-		},
-	})
-
-	if !executorNativeStreamResponseTranslatorExists(streamOutputFormat, streamRequestedFormat) {
-		t.Fatal("stream response transformer was not accepted for stream executor output")
+	if executorNativeStreamResponseTranslatorExists(sdktranslator.Format("plugin-output"), sdktranslator.FormatOpenAI) {
+		t.Fatal("custom plugin format was accepted as a native oagmsg stream conversion")
 	}
 }
 
@@ -975,6 +959,60 @@ func TestNormalizeRequestChainsByPriority(t *testing.T) {
 	got := host.NormalizeRequest(context.Background(), sdktranslator.FormatOpenAI, sdktranslator.FormatClaude, "model", []byte("start"), false)
 	if string(got) != "start|high|low" {
 		t.Fatalf("NormalizeRequest() = %q, want %q", got, "start|high|low")
+	}
+}
+
+func TestNormalizeRequestReturnsOriginalBytesWhenNoRequestNormalizer(t *testing.T) {
+	host := newHostWithRecords(
+		capabilityRecord{
+			id:       "translator-only",
+			priority: 20,
+			plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+				RequestTranslator: requestTranslatorFunc(func(ctx context.Context, req pluginapi.RequestTransformRequest) (pluginapi.PayloadResponse, error) {
+					return pluginapi.PayloadResponse{Body: append(req.Body, []byte("-translated")...)}, nil
+				}),
+			}},
+		},
+		capabilityRecord{
+			id:       "no-hooks",
+			priority: 10,
+		},
+	)
+
+	body := []byte("request-body")
+	got := host.NormalizeRequest(context.Background(), sdktranslator.FormatOpenAI, sdktranslator.FormatClaude, "model", body, false)
+	if &got[0] != &body[0] {
+		t.Fatal("expected no-op NormalizeRequest to return the original request body")
+	}
+	if string(got) != string(body) {
+		t.Fatalf("NormalizeRequest() = %q, want %q", got, body)
+	}
+}
+
+func TestNormalizeRequestClonesInputBeforeNormalizer(t *testing.T) {
+	host := newHostWithRecords(
+		capabilityRecord{
+			id:       "normalizer-present",
+			priority: 10,
+			plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+				RequestNormalizer: requestNormalizerFunc(func(ctx context.Context, req pluginapi.RequestTransformRequest) (pluginapi.PayloadResponse, error) {
+					req.Body[0] = 'x'
+					return pluginapi.PayloadResponse{Body: req.Body}, nil
+				}),
+			}},
+		},
+	)
+
+	body := []byte("request-body")
+	got := host.NormalizeRequest(context.Background(), sdktranslator.FormatOpenAI, sdktranslator.FormatClaude, "model", body, false)
+	if string(body) != "request-body" {
+		t.Fatalf("original body was mutated: %q", body)
+	}
+	if &got[0] == &body[0] {
+		t.Fatal("expected normalizer to return a clone when request mutation is possible")
+	}
+	if string(got) != "xequest-body" {
+		t.Fatalf("NormalizeRequest() = %q, want %q", got, "xequest-body")
 	}
 }
 
@@ -3071,8 +3109,10 @@ func TestExecutorAdapterSelectsCustomOutputWithHostResponseTranslator(t *testing
 		executorRecord,
 	)
 	sdktranslator.SetPluginHooks(host)
+	oagmsg.SetPluginHooks(host.OAGMsgHooks())
 	t.Cleanup(func() {
 		sdktranslator.SetPluginHooks(nil)
+		oagmsg.SetPluginHooks(nil)
 	})
 
 	adapter := newExecutorAdapterForRecordForTest(host, executorRecord, &fakeExecutor{
@@ -3150,8 +3190,8 @@ func TestExecutorAdapterConsumesTranslatedStreamChunksWithoutOutput(t *testing.T
 
 	donePayload := []byte(`data: [DONE]`)
 	doneFrames := adapter.translateExecutorStreamPayload(context.Background(), prepared, donePayload, &param)
-	if len(doneFrames) != 1 {
-		t.Fatalf("done payload translated to %d frames, want 1", len(doneFrames))
+	if len(doneFrames) != 2 {
+		t.Fatalf("done payload translated to %d frames, want 2", len(doneFrames))
 	}
 	if !bytes.Contains(doneFrames[0], []byte("response.completed")) {
 		t.Fatalf("done payload did not produce response.completed: %q", doneFrames[0])
@@ -3161,6 +3201,9 @@ func TestExecutorAdapterConsumesTranslatedStreamChunksWithoutOutput(t *testing.T
 		!bytes.Contains(doneFrames[0], []byte(`"reasoning_tokens":121`)) ||
 		!bytes.Contains(doneFrames[0], []byte(`"total_tokens":510`)) {
 		t.Fatalf("completed payload did not preserve usage: %q", doneFrames[0])
+	}
+	if !bytes.Equal(bytes.TrimSpace(doneFrames[1]), []byte("data: [DONE]")) {
+		t.Fatalf("done payload did not produce terminal marker: %q", doneFrames[1])
 	}
 }
 
@@ -3177,8 +3220,10 @@ func TestExecutorAdapterKeepsRawStreamFallbackWithOnlyHostResponseTranslator(t *
 		}},
 	})
 	sdktranslator.SetPluginHooks(host)
+	oagmsg.SetPluginHooks(host.OAGMsgHooks())
 	t.Cleanup(func() {
 		sdktranslator.SetPluginHooks(nil)
+		oagmsg.SetPluginHooks(nil)
 	})
 	adapter := &executorAdapter{
 		host: host,
