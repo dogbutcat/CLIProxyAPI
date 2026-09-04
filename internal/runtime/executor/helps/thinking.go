@@ -4,6 +4,7 @@ import (
 	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/oagmsg"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 )
 
@@ -43,7 +44,7 @@ func translatedRequestSummaryConfig(body, currentSourcePayload, originalSourcePa
 
 	from := sdktranslator.FromString(fromFormat)
 	to := sdktranslator.FromString(toFormat)
-	if !sdktranslator.HasRequestTransformer(from, to) {
+	if !oagmsg.HasRequestTransformer(from, to) {
 		// A missing translation must remain source-shaped. Same-format requests
 		// were handled by targetSummary above, including explicit native aliases.
 		return thinking.SummaryConfig{}

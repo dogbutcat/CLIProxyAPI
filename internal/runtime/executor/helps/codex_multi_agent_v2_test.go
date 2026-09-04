@@ -11,6 +11,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	_ "github.com/router-for-me/CLIProxyAPI/v7/internal/translator"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/oagmsg"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -21,7 +22,7 @@ type pairRequestPluginHooks struct {
 	onNormalize func(body []byte)
 }
 
-func (h *pairRequestPluginHooks) NormalizeRequest(_ context.Context, _, _ sdktranslator.Format, _ string, body []byte, _ bool) []byte {
+func (h *pairRequestPluginHooks) NormalizeRequest(_ context.Context, _, _ oagmsg.Format, _ string, body []byte, _ bool) []byte {
 	h.calls++
 	if h.onNormalize != nil {
 		h.onNormalize(body)
@@ -30,19 +31,19 @@ func (h *pairRequestPluginHooks) NormalizeRequest(_ context.Context, _, _ sdktra
 	return updated
 }
 
-func (*pairRequestPluginHooks) TranslateRequest(context.Context, sdktranslator.Format, sdktranslator.Format, string, []byte, bool) ([]byte, bool) {
+func (*pairRequestPluginHooks) TranslateRequest(context.Context, oagmsg.Format, oagmsg.Format, string, []byte, bool) ([]byte, bool) {
 	return nil, false
 }
 
-func (*pairRequestPluginHooks) NormalizeResponseBefore(context.Context, sdktranslator.Format, sdktranslator.Format, string, []byte, []byte, []byte, bool) []byte {
+func (*pairRequestPluginHooks) NormalizeResponseBefore(context.Context, oagmsg.Format, oagmsg.Format, string, []byte, []byte, []byte, bool) []byte {
 	return nil
 }
 
-func (*pairRequestPluginHooks) TranslateResponse(context.Context, sdktranslator.Format, sdktranslator.Format, string, []byte, []byte, []byte, bool) ([]byte, bool) {
+func (*pairRequestPluginHooks) TranslateResponse(context.Context, oagmsg.Format, oagmsg.Format, string, []byte, []byte, []byte, bool) ([]byte, bool) {
 	return nil, false
 }
 
-func (*pairRequestPluginHooks) NormalizeResponseAfter(context.Context, sdktranslator.Format, sdktranslator.Format, string, []byte, []byte, []byte, bool) []byte {
+func (*pairRequestPluginHooks) NormalizeResponseAfter(context.Context, oagmsg.Format, oagmsg.Format, string, []byte, []byte, []byte, bool) []byte {
 	return nil
 }
 
@@ -134,8 +135,8 @@ func TestTranslateRequestPairTranslatesDistinctPayloads(t *testing.T) {
 
 func TestTranslateRequestPairPreservesPluginHookInvocations(t *testing.T) {
 	hooks := &pairRequestPluginHooks{}
-	sdktranslator.SetPluginHooks(hooks)
-	t.Cleanup(func() { sdktranslator.SetPluginHooks(nil) })
+	oagmsg.SetPluginHooks(hooks)
+	t.Cleanup(func() { oagmsg.SetPluginHooks(nil) })
 
 	payload := geminiToolHistoryPayload(1)
 	base, work := TranslateRequestPairWithCodexMultiAgentV2(

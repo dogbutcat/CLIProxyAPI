@@ -14,7 +14,7 @@ import (
 	"github.com/tidwall/gjson"
 )
 
-func TestCodexExecutorExecuteResponsesLiteHeaderDoesNotInjectImageGenerationTool(t *testing.T) {
+func TestCodexExecutorExecuteResponsesLiteHeaderDoesNotInjectImageGenerationToolAndFinalizesParallelToolCalls(t *testing.T) {
 	var gotBody []byte
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, errRead := io.ReadAll(r.Body)
@@ -53,12 +53,12 @@ func TestCodexExecutorExecuteResponsesLiteHeaderDoesNotInjectImageGenerationTool
 		t.Fatalf("unexpected tools in responses-lite upstream payload: %s", tools.Raw)
 	}
 	parallelToolCalls := gjson.GetBytes(gotBody, "parallel_tool_calls")
-	if !parallelToolCalls.Exists() || parallelToolCalls.Bool() {
-		t.Fatalf("responses-lite parallel_tool_calls should be false: %s", gotBody)
+	if !parallelToolCalls.Exists() || !parallelToolCalls.Bool() {
+		t.Fatalf("responses-lite final wire parallel_tool_calls should be true: %s", gotBody)
 	}
 }
 
-func TestCodexExecutorExecuteStreamResponsesLiteHeaderForcesParallelToolCallsFalse(t *testing.T) {
+func TestCodexExecutorExecuteStreamResponsesLiteHeaderDoesNotInjectImageGenerationToolAndFinalizesParallelToolCalls(t *testing.T) {
 	var gotBody []byte
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, errRead := io.ReadAll(r.Body)
@@ -100,8 +100,8 @@ func TestCodexExecutorExecuteStreamResponsesLiteHeaderForcesParallelToolCallsFal
 	}
 
 	parallelToolCalls := gjson.GetBytes(gotBody, "parallel_tool_calls")
-	if !parallelToolCalls.Exists() || parallelToolCalls.Bool() {
-		t.Fatalf("responses-lite parallel_tool_calls should be false: %s", gotBody)
+	if !parallelToolCalls.Exists() || !parallelToolCalls.Bool() {
+		t.Fatalf("responses-lite final wire parallel_tool_calls should be true: %s", gotBody)
 	}
 }
 

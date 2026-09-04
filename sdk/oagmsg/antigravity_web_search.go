@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -36,37 +37,108 @@ func newAnthropicWebSearchRequestMetadata(payload []byte) *anthropicWebSearchReq
 	}
 }
 
+func newResponsesWebSearchRequestMetadata(payload []byte) *responsesWebSearchRequestMetadata {
+	root := gjson.ParseBytes(payload)
+	return &responsesWebSearchRequestMetadata{
+		onlyTypedSearchTools: hasOnlyResponsesWebSearchTools(root),
+		allowsToolChoice:     allowsResponsesWebSearchToolChoice(root),
+		query:                extractResponsesWebSearchQuery(root),
+		includedDomains:      extractResponsesWebSearchAllowedDomains(root),
+	}
+}
+
 func shouldBuildAntigravityWebSearchRequest(req *UnifiedRequest) bool {
-	if req == nil || req.SourceFormat != FormatAnthropic {
+	if req == nil {
 		return false
 	}
-	if registry.AntigravityWebSearchModelFor(req.Model) == "" {
+
+	switch req.SourceFormat {
+	case FormatAnthropic:
+		meta := req.anthropicWebSearch
+		return meta != nil &&
+			meta.onlyTypedSearchTools &&
+			meta.allowsToolChoice &&
+			antigravitySupportsNativeWebSearch(req.Model, req.modelInfo)
+	case FormatOpenAIResponse:
+		meta := req.responsesWebSearch
+		return meta != nil &&
+			meta.onlyTypedSearchTools &&
+			meta.allowsToolChoice &&
+			antigravitySupportsNativeWebSearch(req.Model, req.modelInfo)
+	default:
 		return false
 	}
-	meta := req.anthropicWebSearch
-	return meta != nil && meta.onlyTypedSearchTools && meta.allowsToolChoice
 }
 
 func buildAntigravityWebSearchRequest(req *UnifiedRequest) ([]byte, bool) {
 	if !shouldBuildAntigravityWebSearchRequest(req) {
 		return nil, false
 	}
-	meta := req.anthropicWebSearch
+	query, maxUses, includedDomains := antigravityWebSearchRequestParams(req)
 	out := []byte(`{"model":"","requestType":"web_search","request":{"contents":[{"role":"user","parts":[{"text":""}]}],"systemInstruction":{"role":"user","parts":[{"text":""}]},"tools":[{"googleSearch":{"enhancedContent":{"imageSearch":{"maxResultCount":5}}}}],"generationConfig":{"candidateCount":1}}}`)
 	out, _ = sjson.SetBytes(out, "model", req.Model)
-	out, _ = sjson.SetBytes(out, "request.contents.0.parts.0.text", meta.query)
+	out, _ = sjson.SetBytes(out, "request.contents.0.parts.0.text", query)
 	out, _ = sjson.SetBytes(out, "request.systemInstruction.parts.0.text", antigravityWebSearchSystemInstruction)
-	out, _ = sjson.SetBytes(out, "request.tools.0.googleSearch.enhancedContent.imageSearch.maxResultCount", meta.maxUses)
-	if len(meta.includedDomains) > 0 {
-		if domainsJSON, err := json.Marshal(meta.includedDomains); err == nil {
+	out, _ = sjson.SetBytes(out, "request.tools.0.googleSearch.enhancedContent.imageSearch.maxResultCount", maxUses)
+	if len(includedDomains) > 0 {
+		if domainsJSON, err := json.Marshal(includedDomains); err == nil {
 			out, _ = sjson.SetRawBytes(out, "request.tools.0.googleSearch.includedDomains", domainsJSON)
 		}
 	}
 	return out, true
 }
 
+func antigravityWebSearchRequestParams(req *UnifiedRequest) (query string, maxUses int64, includedDomains []string) {
+	const defaultMaxResultCount int64 = 5
+
+	switch req.SourceFormat {
+	case FormatAnthropic:
+		if meta := req.anthropicWebSearch; meta != nil {
+			return meta.query, meta.maxUses, meta.includedDomains
+		}
+	case FormatOpenAIResponse:
+		if meta := req.responsesWebSearch; meta != nil {
+			return meta.query, defaultMaxResultCount, meta.includedDomains
+		}
+	}
+	return "", defaultMaxResultCount, nil
+}
+
+func antigravitySupportsNativeWebSearch(model string, modelInfo *registry.ModelInfo) bool {
+	if modelInfo != nil && modelInfo.NativeCapabilities != nil && modelInfo.NativeCapabilities.WebSearch != nil {
+		return *modelInfo.NativeCapabilities.WebSearch
+	}
+	model = strings.TrimSpace(thinking.ParseSuffix(strings.TrimSpace(model)).ModelName)
+	if model == "" {
+		return false
+	}
+	for _, localInfo := range registry.GetGlobalRegistry().GetAvailableModelsByProvider("antigravity") {
+		if localInfo == nil {
+			continue
+		}
+		localModel := strings.TrimSpace(thinking.ParseSuffix(strings.TrimSpace(localInfo.ID)).ModelName)
+		if !strings.EqualFold(localModel, model) {
+			continue
+		}
+		if capabilities := localInfo.NativeCapabilities; capabilities != nil && capabilities.WebSearch != nil && !*capabilities.WebSearch {
+			return false
+		}
+		return localInfo.SupportsWebSearch
+	}
+	return false
+}
+
 func isClaudeTypedWebSearchToolType(toolType string) bool {
 	return toolType == "web_search_20250305" || toolType == "web_search_20260209"
+}
+
+func isResponsesWebSearchToolType(toolType string) bool {
+	switch strings.TrimSpace(toolType) {
+	case "web_search", "web_search_2025_08_26", "web_search_preview", "web_search_preview_2025_03_11":
+		return true
+	default:
+		return false
+	}
 }
 
 func hasClaudeTypedWebSearchTool(payload []byte) bool {
@@ -101,6 +173,22 @@ func hasOnlyClaudeTypedWebSearchTools(payload []byte) bool {
 	return hasWebSearch
 }
 
+func hasOnlyResponsesWebSearchTools(root gjson.Result) bool {
+	tools := root.Get("tools")
+	if !tools.IsArray() {
+		return false
+	}
+	hasSearch := false
+	for _, tool := range tools.Array() {
+		if isResponsesWebSearchToolType(tool.Get("type").String()) {
+			hasSearch = true
+			continue
+		}
+		return false
+	}
+	return hasSearch
+}
+
 func allowsClaudeWebSearchToolChoice(payload []byte) bool {
 	toolChoice := gjson.GetBytes(payload, "tool_choice")
 	if !toolChoice.Exists() {
@@ -122,6 +210,43 @@ func allowsClaudeWebSearchToolChoice(payload []byte) bool {
 		return true
 	case "tool":
 		return toolChoice.Get("name").String() == "web_search"
+	default:
+		return false
+	}
+}
+
+func allowsResponsesWebSearchToolChoice(root gjson.Result) bool {
+	toolChoice := root.Get("tool_choice")
+	if !toolChoice.Exists() {
+		return true
+	}
+	if toolChoice.Type == gjson.String {
+		switch strings.TrimSpace(toolChoice.String()) {
+		case "", "auto", "required":
+			return true
+		default:
+			return false
+		}
+	}
+	if !toolChoice.IsObject() {
+		return false
+	}
+	switch strings.TrimSpace(toolChoice.Get("type").String()) {
+	case "", "auto", "required":
+		return true
+	case "web_search", "web_search_2025_08_26", "web_search_preview", "web_search_preview_2025_03_11":
+		return true
+	case "allowed_tools":
+		tools := toolChoice.Get("tools")
+		if !tools.IsArray() {
+			return false
+		}
+		for _, tool := range tools.Array() {
+			if isResponsesWebSearchToolType(tool.Get("type").String()) {
+				return true
+			}
+		}
+		return false
 	default:
 		return false
 	}
@@ -173,6 +298,30 @@ func extractClaudeWebSearchAllowedDomains(payload []byte) []string {
 	return nil
 }
 
+func extractResponsesWebSearchAllowedDomains(root gjson.Result) []string {
+	tools := root.Get("tools")
+	if !tools.IsArray() {
+		return nil
+	}
+	for _, tool := range tools.Array() {
+		if !isResponsesWebSearchToolType(tool.Get("type").String()) {
+			continue
+		}
+		allowedDomains := tool.Get("filters.allowed_domains")
+		if !allowedDomains.IsArray() {
+			return nil
+		}
+		domains := make([]string, 0, len(allowedDomains.Array()))
+		for _, domain := range allowedDomains.Array() {
+			if trimmed := strings.TrimSpace(domain.String()); trimmed != "" {
+				domains = append(domains, trimmed)
+			}
+		}
+		return domains
+	}
+	return nil
+}
+
 func extractClaudeWebSearchQuery(payload []byte) string {
 	messages := gjson.GetBytes(payload, "messages")
 	if !messages.IsArray() {
@@ -208,6 +357,65 @@ func extractClaudeTextContent(content gjson.Result) string {
 		}
 	}
 	return strings.TrimSpace(b.String())
+}
+
+func extractResponsesWebSearchQuery(root gjson.Result) string {
+	input := root.Get("input")
+	if input.Type == gjson.String {
+		return strings.TrimSpace(input.String())
+	}
+	if input.IsArray() {
+		items := input.Array()
+		var flatParts []string
+		isFlatParts := true
+		for _, item := range items {
+			if item.Get("type").String() == "input_text" {
+				if text := strings.TrimSpace(item.Get("text").String()); text != "" {
+					flatParts = append(flatParts, text)
+				}
+				continue
+			}
+			if item.Get("role").Exists() {
+				isFlatParts = false
+				break
+			}
+		}
+		if isFlatParts && len(flatParts) > 0 {
+			return strings.Join(flatParts, "\n")
+		}
+
+		for i := len(items) - 1; i >= 0; i-- {
+			item := items[i]
+			role := item.Get("role").String()
+			if role != "" && role != "user" {
+				continue
+			}
+			content := item.Get("content")
+			if content.Type == gjson.String {
+				if text := strings.TrimSpace(content.String()); text != "" {
+					return text
+				}
+			}
+			if content.IsArray() {
+				var textParts []string
+				for _, part := range content.Array() {
+					if text := strings.TrimSpace(part.Get("text").String()); text != "" {
+						textParts = append(textParts, text)
+					}
+				}
+				if len(textParts) > 0 {
+					return strings.Join(textParts, "\n")
+				}
+			}
+			if text := strings.TrimSpace(item.Get("text").String()); text != "" {
+				return text
+			}
+		}
+	}
+	if instructions := strings.TrimSpace(root.Get("instructions").String()); instructions != "" {
+		return instructions
+	}
+	return ""
 }
 
 func hasAntigravityGoogleSearchTool(payload []byte) bool {

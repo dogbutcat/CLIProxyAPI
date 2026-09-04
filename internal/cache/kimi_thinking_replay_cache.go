@@ -376,7 +376,16 @@ func validKimiThinkingReplayContent(content []byte) bool {
 		return false
 	}
 	root := gjson.ParseBytes(content)
-	return root.IsArray() && len(root.Array()) > 0 && len(root.Array()) <= KimiThinkingReplayCacheMaxBlocksPerEntry
+	parts := root.Array()
+	if !root.IsArray() || len(parts) == 0 || len(parts) > KimiThinkingReplayCacheMaxBlocksPerEntry {
+		return false
+	}
+	for _, part := range parts {
+		if !part.IsObject() || strings.TrimSpace(part.Get("type").String()) == "" {
+			return false
+		}
+	}
+	return true
 }
 
 func enforceKimiThinkingReplayLimitsLocked() {

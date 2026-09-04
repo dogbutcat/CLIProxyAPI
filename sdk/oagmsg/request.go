@@ -3,6 +3,7 @@ package oagmsg
 import (
 	"strings"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/signature"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 )
@@ -57,6 +58,10 @@ type UnifiedRequest struct {
 	// facts that would otherwise be lost during generic request parsing.
 	anthropicWebSearch *anthropicWebSearchRequestMetadata
 
+	// responsesWebSearch preserves request-scoped Responses web-search
+	// eligibility facts that would otherwise be lost during generic parsing.
+	responsesWebSearch *responsesWebSearchRequestMetadata
+
 	// responsesTools preserves request-scoped Responses tool declarations for
 	// target-specific filtering. It is intentionally private to avoid expanding
 	// the public UnifiedRequest API.
@@ -77,6 +82,10 @@ type UnifiedRequest struct {
 	// translationOptions carries per-call behavior that must not become part of
 	// the protocol-neutral public request model.
 	translationOptions RequestTranslationOptions
+
+	// modelInfo preserves executor-selected model capability metadata for
+	// target serializers that need request-scoped provider facts.
+	modelInfo *registry.ModelInfo
 }
 
 type anthropicWebSearchRequestMetadata struct {
@@ -84,6 +93,13 @@ type anthropicWebSearchRequestMetadata struct {
 	allowsToolChoice     bool
 	query                string
 	maxUses              int64
+	includedDomains      []string
+}
+
+type responsesWebSearchRequestMetadata struct {
+	onlyTypedSearchTools bool
+	allowsToolChoice     bool
+	query                string
 	includedDomains      []string
 }
 

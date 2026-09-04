@@ -6,14 +6,8 @@ import (
 
 	multiagentv2 "github.com/router-for-me/CLIProxyAPI/v7/internal/client/codex/optimize-multi-agent-v2"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
-	openaichatclaude "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/claude/openai/chat-completions"
-	responsesclaude "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/claude/openai/responses"
-	codexclaude "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/codex/claude"
-	geminiclaude "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/gemini/claude"
-	interactionsclaude "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/interactions/claude"
-	openaiclaude "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/openai/claude"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/oagmsg"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 )
 
@@ -67,7 +61,7 @@ func TranslateRequestEnvelopePairWithCodexMultiAgentV2(ctx context.Context, head
 	originalReq := req
 	originalReq.Body = originalPayload
 	original = TranslateRequestEnvelopeWithCodexMultiAgentV2(ctx, headers, cfg, from, to, originalReq).Body
-	if sameByteSlice(originalPayload, requestPayload) && !sdktranslator.HasPluginHooks() {
+	if sameByteSlice(originalPayload, requestPayload) && !oagmsg.HasPluginHooks() {
 		// The caller mutates the working copy, so it must not share the baseline array.
 		return original, append([]byte(nil), original...)
 	}
@@ -111,28 +105,9 @@ func TranslateRequestWithAPIKeyModelCompatibility(ctx context.Context, headers h
 			payload = multiagentv2.RewriteCodexMultiAgentV2Input(ctx, headers, payload, cfg)
 		}
 	}
-
-	var translated []byte
-	switch {
-	case from == sdktranslator.FormatClaude && to == sdktranslator.FormatCodex:
-		translated = codexclaude.ConvertClaudeRequestToCodexWithCompat(model, payload, stream)
-	case from == sdktranslator.FormatClaude && to == sdktranslator.FormatGemini:
-		translated = geminiclaude.ConvertClaudeRequestToGeminiWithCompat(model, payload, stream)
-	case from == sdktranslator.FormatClaude && to == sdktranslator.FormatInteractions:
-		translated = interactionsclaude.ConvertClaudeRequestToInteractionsWithCompat(model, payload, stream)
-	case from == sdktranslator.FormatClaude && to == sdktranslator.FormatOpenAI:
-		translated = openaiclaude.ConvertClaudeRequestToOpenAIWithCompat(model, payload, stream)
-	case from == sdktranslator.FormatOpenAI && to == sdktranslator.FormatClaude:
-		translated = openaichatclaude.ConvertOpenAIRequestToClaudeWithCompat(model, payload, stream)
-	case from == sdktranslator.FormatOpenAIResponse && to == sdktranslator.FormatClaude:
-		translated = responsesclaude.ConvertOpenAIResponsesRequestToClaudeWithCompat(model, payload, stream)
-	default:
-		return TranslateRequestWithCodexMultiAgentV2(ctx, headers, cfg, from, to, model, payload, stream)
-	}
-
-	summaryConfig := thinking.ExtractTranslatedSummaryConfig(payload, from.String(), to.String())
-	translated = thinking.ApplySummaryConfigForModel(translated, to.String(), model, summaryConfig)
-	return sdktranslator.NormalizeRequest(ctx, from, to, model, translated, stream)
+	return oagmsg.TranslateRequestWithOptions(from, to, model, payload, stream, oagmsg.RequestTranslationOptions{
+		PreserveThinkingBlocks: isCompat,
+	})
 }
 
 // HasCodexMultiAgentV2NamespaceConflict reports whether the request defines
