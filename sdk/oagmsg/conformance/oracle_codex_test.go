@@ -9,10 +9,10 @@ import (
 	"sync"
 	"testing"
 
-	codexclaude "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/codex/claude"
-	codexchat "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/codex/openai/chat-completions"
-	codexresponses "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/codex/openai/responses"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/oagmsg"
+	codexclaude "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/codex/claude"
+	codexchat "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/codex/openai/chat-completions"
+	codexresponses "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/codex/openai/responses"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/oagmsg"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )

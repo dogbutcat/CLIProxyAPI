@@ -10,9 +10,9 @@ import (
 	"strings"
 	"time"
 
-	internallogging "github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
-	usagebridge "github.com/router-for-me/CLIProxyAPI/v7/internal/usage"
-	coreusage "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
+	internallogging "github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
+	usagebridge "github.com/router-for-me/CLIProxyAPI/v8/internal/usage"
+	coreusage "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
 )
 
 type EventRecorder interface {

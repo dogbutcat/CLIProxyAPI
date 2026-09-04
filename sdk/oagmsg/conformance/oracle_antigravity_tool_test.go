@@ -6,8 +6,8 @@ import (
 	"reflect"
 	"testing"
 
-	agclaude "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/antigravity/claude"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/oagmsg"
+	agclaude "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/antigravity/claude"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/oagmsg"
 )
 
 func TestOracleAntigravityWrappedToolRequestSemantics(t *testing.T) {

@@ -11,7 +11,7 @@ import (
 
 	log "github.com/sirupsen/logrus"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/oagmsg"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/oagmsg"
 )
 
 const (

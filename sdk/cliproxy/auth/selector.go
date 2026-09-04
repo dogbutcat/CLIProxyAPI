@@ -508,7 +508,7 @@ func getSelectorAvailableAuthsWithPriorityMode(ctx context.Context, auths []*Aut
 			// unrelated cooldowns. Affinity bindings may span all priority tiers, but
 			// fallback selection must still use the highest available tier.
 			if !allPriorities {
-				return highestPriorityAuths(auths), nil
+				return highestPriorityAuths(auths, model), nil
 			}
 			return auths, nil
 		}

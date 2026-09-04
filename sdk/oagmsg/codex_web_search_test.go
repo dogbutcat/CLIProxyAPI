@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	codexclaude "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/codex/claude"
+	codexclaude "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/codex/claude"
 	"github.com/tidwall/gjson"
 )
 

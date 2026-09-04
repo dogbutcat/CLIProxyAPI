@@ -7,8 +7,8 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	plusvendor "github.com/router-for-me/CLIProxyAPI/v7/internal/usage/plusvendor"
-	plusstore "github.com/router-for-me/CLIProxyAPI/v7/internal/usage/plusvendor/store"
+	plusvendor "github.com/router-for-me/CLIProxyAPI/v8/internal/usage/plusvendor"
+	plusstore "github.com/router-for-me/CLIProxyAPI/v8/internal/usage/plusvendor/store"
 )
 
 type modelPricesRequest struct {

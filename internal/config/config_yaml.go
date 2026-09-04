@@ -62,6 +62,7 @@ func SaveConfigPreserveComments(configFile string, cfg *Config, migrateV8 ...boo
 		removeLegacyGenerativeLanguageKeys(original.Content[0])
 	}
 	removeLegacyOpenAICompatAPIKeys(original.Content[0])
+	removeLegacyOpenCodeGoKeys(original.Content[0])
 
 	pruneMappingToGeneratedKeys(original.Content[0], generated.Content[0], "oauth-excluded-models")
 	pruneMappingToGeneratedKeys(original.Content[0], generated.Content[0], "oauth-model-alias")
@@ -888,6 +889,23 @@ func removeLegacyGenerativeLanguageKeys(root *yaml.Node) {
 		return
 	}
 	removeMapKey(root, "generative-language-api-key")
+}
+
+func removeLegacyOpenCodeGoKeys(root *yaml.Node) {
+	if root == nil || root.Kind != yaml.MappingNode {
+		return
+	}
+	removeMapKey(root, "key-groups")
+	idx := findMapKeyIndex(root, "routing")
+	if idx < 0 || idx+1 >= len(root.Content) {
+		return
+	}
+	routing := root.Content[idx+1]
+	if routing == nil || routing.Kind != yaml.MappingNode {
+		return
+	}
+	removeMapKey(routing, "opencode-go-poll-interval")
+	removeMapKey(routing, "opencode-go-poll-threshold")
 }
 
 func removeLegacyAuthBlock(root *yaml.Node) {

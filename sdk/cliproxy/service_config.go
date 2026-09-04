@@ -5,6 +5,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/watcher/synthesizer"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
@@ -29,6 +30,7 @@ type routingRuntimeState struct {
 	sessionAffinity          bool
 	sessionAffinityTTL       time.Duration
 	sessionAffinitySubagents bool
+	authDir                  string
 }
 
 func normalizedRoutingRuntimeState(cfg *config.Config) routingRuntimeState {
@@ -46,8 +48,11 @@ func normalizedRoutingRuntimeState(cfg *config.Config) routingRuntimeState {
 		state.strategy = "weighted-round-robin"
 	case "fill-first", "fillfirst", "ff":
 		state.strategy = "fill-first"
+	case "seq-random", "sequential-random", "seqrandom", "sr":
+		state.strategy = "seq-random"
 	}
 	state.sessionAffinity = cfg.Routing.SessionAffinity
+	state.authDir = strings.TrimSpace(cfg.AuthDir)
 	if ttl := strings.TrimSpace(cfg.Routing.SessionAffinityTTL); ttl != "" {
 		if parsed, errParse := time.ParseDuration(ttl); errParse == nil && parsed > 0 {
 			if parsed < time.Second {
@@ -69,6 +74,11 @@ func newRoutingSelector(state routingRuntimeState) coreauth.Selector {
 		selector = &coreauth.WeightedRoundRobinSelector{}
 	case "fill-first":
 		selector = &coreauth.FillFirstSelector{}
+	case "seq-random":
+		selector = &coreauth.SeqRandomStartSelector{}
+		if store := newPrefixHashStoreForRouting(state); store != nil {
+			selector = coreauth.NewCacheAwareSelector(selector, store)
+		}
 	default:
 		selector = &coreauth.RoundRobinSelector{}
 	}
@@ -81,6 +91,23 @@ func newRoutingSelector(state routingRuntimeState) coreauth.Selector {
 		})
 	}
 	return selector
+}
+
+func newPrefixHashStoreForRouting(state routingRuntimeState) *coreauth.PrefixHashStore {
+	if strings.TrimSpace(state.authDir) == "" {
+		return nil
+	}
+	authDir, errResolve := util.ResolveAuthDir(state.authDir)
+	if errResolve != nil {
+		log.Warnf("cache-aware routing disabled: resolve auth dir: %v", errResolve)
+		return nil
+	}
+	store, errStore := coreauth.NewPrefixHashStore(authDir, 0, 0)
+	if errStore != nil {
+		log.Warnf("cache-aware routing disabled: %v", errStore)
+		return nil
+	}
+	return store
 }
 
 func (s *Service) applyConfigUpdateWithAuthSynthesis(ctx context.Context, newCfg *config.Config, synthesizeConfigAuths bool) bool {
@@ -191,6 +218,12 @@ func (s *Service) applyConfigRuntime(ctx context.Context, commit configCommit, s
 	if errContext := ctx.Err(); errContext != nil {
 		return false
 	}
+	if !s.syncOpenCodeRuntimeConfig(registrationCtx, cfg) {
+		return false
+	}
+	if errContext := ctx.Err(); errContext != nil {
+		return false
+	}
 	if s.coreManager != nil && !cfg.Home.Enabled && cfg.SaveCooldownStatus {
 		if errRestoreCooldown := s.coreManager.RestoreCooldownStates(registrationCtx); errRestoreCooldown != nil && ctx.Err() == nil {
 			log.Warnf("failed to restore cooldown state after config update: %v", errRestoreCooldown)
@@ -214,14 +247,14 @@ func (s *Service) applyManagerConfig(ctx context.Context, commit configCommit) b
 		return false
 	}
 	routingState := normalizedRoutingRuntimeState(commit.cfg)
-	if s.appliedRoutingState == nil || *s.appliedRoutingState != routingState {
-		s.coreManager.SetSelector(newRoutingSelector(routingState))
-		s.appliedRoutingState = &routingState
-	}
 	s.applyRetryConfig(commit.cfg)
 	store := s.resolveCooldownStateStore(commit.cfg)
 	if !s.coreManager.ApplyConfigWithCooldownStateStore(ctx, commit.cfg, store) {
 		return false
+	}
+	if s.appliedRoutingState == nil || *s.appliedRoutingState != routingState {
+		s.coreManager.SetSelector(newRoutingSelector(routingState))
+		s.appliedRoutingState = &routingState
 	}
 	s.coreManager.SetOAuthModelAlias(commit.cfg.OAuthModelAlias)
 	return true

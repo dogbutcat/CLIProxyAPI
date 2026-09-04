@@ -2,7 +2,7 @@ package oagmsg
 
 import (
 	"encoding/json"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	"strconv"
 	"strings"
 )

@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	upstream "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/gemini/openai/responses"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/oagmsg"
+	upstream "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/gemini/openai/responses"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/oagmsg"
 	"github.com/tidwall/gjson"
 )
 

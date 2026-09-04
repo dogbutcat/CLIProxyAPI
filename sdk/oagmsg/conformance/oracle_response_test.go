@@ -11,14 +11,14 @@ import (
 	"strings"
 	"testing"
 
-	agclaude "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/antigravity/claude"
-	claudeResponses "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/claude/openai/responses"
-	codexclaude "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/codex/claude"
-	codexOpenAI "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/codex/openai/chat-completions"
-	codexResponses "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/codex/openai/responses"
-	geminiResponses "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/gemini/openai/responses"
-	openAIResponses "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/openai/openai/responses"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/oagmsg"
+	agclaude "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/antigravity/claude"
+	claudeResponses "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/claude/openai/responses"
+	codexclaude "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/codex/claude"
+	codexOpenAI "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/codex/openai/chat-completions"
+	codexResponses "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/codex/openai/responses"
+	geminiResponses "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/gemini/openai/responses"
+	openAIResponses "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/openai/openai/responses"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/oagmsg"
 	"github.com/tidwall/gjson"
 )
 

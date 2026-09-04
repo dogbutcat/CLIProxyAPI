@@ -8,8 +8,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	plusstore "github.com/router-for-me/CLIProxyAPI/v7/internal/usage/plusvendor/store"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	plusstore "github.com/router-for-me/CLIProxyAPI/v8/internal/usage/plusvendor/store"
 )
 
 type BridgeConfig struct {

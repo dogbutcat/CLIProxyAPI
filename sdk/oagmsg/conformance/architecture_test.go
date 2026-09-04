@@ -100,7 +100,7 @@ func TestTranslatorArchitectureCheckerInjectedSources(t *testing.T) {
 
 import (
 	"context"
-	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 )
 
 type Holder struct {
@@ -121,7 +121,7 @@ func use(ctx context.Context, hooks sdktranslator.PluginHooks, h *Holder) {
 			name: "blocks default package conversion helpers",
 			src: `package sample
 
-import "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
+import "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 
 func use() {
 	_ = translator.TranslateRequest("from", "to", "model", nil, false)
@@ -139,7 +139,7 @@ func use() {
 			name: "blocks aliased conversion helpers",
 			src: `package sample
 
-import tr "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
+import tr "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 
 func use() {
 	_ = tr.TranslateStream(nil, "from", "to", "model", nil, nil, nil, nil)
@@ -155,8 +155,8 @@ func use() {
 			name: "blocks dot and blank imports of plain translator",
 			src: `package sample
 
-import . "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
-import _ "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
+import . "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
+import _ "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 `,
 			want: []string{
 				"case.go:3 imports sdk/translator as dot import",
@@ -167,8 +167,8 @@ import _ "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 			name: "blocks forbidden translator implementation imports",
 			src: `package sample
 
-import _ "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/openai"
-import "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator/builtin"
+import _ "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/openai"
+import "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator/builtin"
 
 var _ = builtin.DefaultRegistry
 `,
@@ -181,7 +181,7 @@ var _ = builtin.DefaultRegistry
 			name: "blocks chained registry and pipeline constructors",
 			src: `package sample
 
-import sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
+import sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 
 func use() {
 	_ = sdktranslator.Default().TranslateRequest("from", "to", "model", nil, false)
@@ -199,7 +199,7 @@ func use() {
 			name: "blocks typed locals parameters and constructor assignments",
 			src: `package sample
 
-import sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
+import sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 
 func use(r *sdktranslator.Registry, p *sdktranslator.Pipeline) {
 	r.SetPluginHooks(nil)
@@ -222,7 +222,7 @@ func use(r *sdktranslator.Registry, p *sdktranslator.Pipeline) {
 
 import (
 	"context"
-	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 )
 
 type Holder struct {
@@ -250,7 +250,7 @@ func use(ctx context.Context, h *Holder) {
 			name: "blocks calls inside case comm clauses and closures",
 			src: `package sample
 
-import sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
+import sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 
 func use(ch chan int, r *sdktranslator.Registry) {
 	switch <-ch {
@@ -282,7 +282,7 @@ label:
 			name: "blocks cross file package globals",
 			src: `package sample
 
-import sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
+import sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 
 var shared = sdktranslator.NewRegistry()
 `,
@@ -294,7 +294,7 @@ var shared = sdktranslator.NewRegistry()
 			name: "blocks package and method value references",
 			src: `package sample
 
-import sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
+import sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 
 func use(r *sdktranslator.Registry, p *sdktranslator.Pipeline) {
 	f := sdktranslator.TranslateRequest
@@ -318,7 +318,7 @@ func use(r *sdktranslator.Registry, p *sdktranslator.Pipeline) {
 			name: "blocks ByFormatName package helpers direct and function values",
 			src: `package sample
 
-import sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
+import sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 
 func use() {
 	_ = sdktranslator.TranslateRequestByFormatName("from", "to", "model", nil, false)
@@ -345,7 +345,7 @@ func use() {
 			name: "allows internal translator imports in test oracle files",
 			src: `package sample
 
-import _ "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/openai"
+import _ "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/openai"
 
 func use() {}
 `,
@@ -354,8 +354,8 @@ func use() {}
 			name: "allows translatorish and builtinextra import path segments",
 			src: `package sample
 
-import _ "github.com/router-for-me/CLIProxyAPI/v7/internal/translatorish"
-import _ "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator/builtinextra"
+import _ "github.com/router-for-me/CLIProxyAPI/v8/internal/translatorish"
+import _ "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator/builtinextra"
 
 func use() {}
 `,
@@ -364,10 +364,10 @@ func use() {}
 			name: "blocks actual import subtrees with exact segment boundaries",
 			src: `package sample
 
-import _ "github.com/router-for-me/CLIProxyAPI/v7/internal/translator"
-import _ "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/openai"
-import _ "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator/builtin"
-import _ "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator/builtin/openai"
+import _ "github.com/router-for-me/CLIProxyAPI/v8/internal/translator"
+import _ "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/openai"
+import _ "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator/builtin"
+import _ "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator/builtin/openai"
 `,
 			want: []string{
 				"case.go:3 imports internal/translator",
@@ -380,7 +380,7 @@ import _ "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator/builtin/openai"
 			name: "blocks registry pipeline aliases and embedded promoted calls",
 			src: `package sample
 
-import sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
+import sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 
 type RegistryAlias = sdktranslator.Registry
 type PipelineAlias = sdktranslator.Pipeline
@@ -409,7 +409,7 @@ func use(rh *RegistryHolder, ph *PipelineHolder, r *RegistryAlias, p *PipelineAl
 			name: "does not treat defined translator-shaped types as aliases",
 			src: `package sample
 
-import sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
+import sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 
 type RegistryCopy sdktranslator.Registry
 type PipelineCopy sdktranslator.Pipeline
@@ -422,7 +422,7 @@ var _ *PipelineCopy
 			name: "preserves declared static type across unknown assignment",
 			src: `package sample
 
-import sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
+import sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 
 func obtain() *sdktranslator.Registry { return nil }
 
@@ -440,7 +440,7 @@ func use() {
 			name: "preserves parameter scope through short declarations",
 			src: `package sample
 
-import sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
+import sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 
 func obtain() (*sdktranslator.Registry, error) { return nil, nil }
 
@@ -464,7 +464,7 @@ func use(r *sdktranslator.Registry) {
 			name: "allows short declaration shadowing registry with plugin hooks",
 			src: `package sample
 
-import sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
+import sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 
 type pluginHooks struct{}
 
@@ -482,7 +482,7 @@ func use(r *sdktranslator.Registry, hooks pluginHooks) {
 			name: "preserves predeclared range assignment static type",
 			src: `package sample
 
-import sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
+import sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 
 func use(registries []*sdktranslator.Registry) {
 	var r *sdktranslator.Registry
@@ -499,7 +499,7 @@ func use(registries []*sdktranslator.Registry) {
 			name: "allows local declaration to shadow translator import alias",
 			src: `package sample
 
-import sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
+import sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 
 type SomePlugin struct{}
 
@@ -514,7 +514,7 @@ func use(sdktranslator SomePlugin) {
 			name: "allows shadowed translator alias constructor methods",
 			src: `package sample
 
-import sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
+import sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 
 type pluginRegistry struct{}
 type pluginTranslator struct{}
@@ -532,7 +532,7 @@ func use(sdktranslator pluginTranslator) {
 			name: "blocks forbidden selector references on assignment lhs children",
 			src: `package sample
 
-import sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
+import sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 
 func use(m map[any]int) {
 	m[sdktranslator.TranslateRequest] = 1
@@ -546,7 +546,7 @@ func use(m map[any]int) {
 			name: "blocks recursively promoted embedded registry methods",
 			src: `package sample
 
-import sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
+import sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 
 type Base struct {
 	*sdktranslator.Registry
@@ -601,7 +601,7 @@ var shared *AliasA
 `,
 					"b.go": `package sample
 
-import sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
+import sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 
 type AliasB = sdktranslator.Registry
 `,

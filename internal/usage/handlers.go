@@ -11,9 +11,9 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	plusvendor "github.com/router-for-me/CLIProxyAPI/v7/internal/usage/plusvendor"
-	plusstore "github.com/router-for-me/CLIProxyAPI/v7/internal/usage/plusvendor/store"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	plusvendor "github.com/router-for-me/CLIProxyAPI/v8/internal/usage/plusvendor"
+	plusstore "github.com/router-for-me/CLIProxyAPI/v8/internal/usage/plusvendor/store"
 )
 
 type MonitoringAuthMetadata struct {

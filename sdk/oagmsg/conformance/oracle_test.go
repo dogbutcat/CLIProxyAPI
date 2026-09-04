@@ -5,10 +5,10 @@ import (
 	"strings"
 	"testing"
 
-	chat_completions "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/claude/openai/chat-completions"
-	codex_openai "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/codex/openai/chat-completions"
-	openai_claude "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/openai/claude"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/oagmsg"
+	chat_completions "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/claude/openai/chat-completions"
+	codex_openai "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/codex/openai/chat-completions"
+	openai_claude "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/openai/claude"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/oagmsg"
 	"github.com/tidwall/gjson"
 )
 

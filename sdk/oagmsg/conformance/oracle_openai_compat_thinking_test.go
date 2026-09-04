@@ -4,8 +4,8 @@ import (
 	"reflect"
 	"testing"
 
-	openaiClaude "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/openai/claude"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/oagmsg"
+	openaiClaude "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/openai/claude"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/oagmsg"
 	"github.com/tidwall/gjson"
 )
 

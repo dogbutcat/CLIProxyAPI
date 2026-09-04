@@ -5,8 +5,8 @@ import (
 	"reflect"
 	"testing"
 
-	responses_to_claude "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/claude/openai/responses"
-	responses_to_chat "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/openai/openai/responses"
+	responses_to_claude "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/claude/openai/responses"
+	responses_to_chat "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/openai/openai/responses"
 	"github.com/tidwall/gjson"
 )
 

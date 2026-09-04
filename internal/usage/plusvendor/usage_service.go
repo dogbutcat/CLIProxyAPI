@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	plusstore "github.com/router-for-me/CLIProxyAPI/v7/internal/usage/plusvendor/store"
+	plusstore "github.com/router-for-me/CLIProxyAPI/v8/internal/usage/plusvendor/store"
 )
 
 const (

@@ -10,9 +10,9 @@ import (
 	"strings"
 	"testing"
 
-	responses_to_claude "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/claude/openai/responses"
-	responses_to_chat "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/openai/openai/responses"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/oagmsg"
+	responses_to_claude "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/claude/openai/responses"
+	responses_to_chat "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/openai/openai/responses"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/oagmsg"
 )
 
 type t81OracleDirection string

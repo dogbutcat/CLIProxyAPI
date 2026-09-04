@@ -14,6 +14,7 @@ import (
 	"github.com/gin-gonic/gin"
 	xaiauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/xai"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	quotahub "github.com/router-for-me/CLIProxyAPI/v8/internal/quota/hub"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/proxyutil"
@@ -214,6 +215,7 @@ func (h *Handler) APICall(c *gin.Context) {
 	}
 	httpClient.Transport = h.apiCallTransport(auth, requestProxyURL)
 
+	completeManualQuery := quotahub.BeginManualQuery(c.Request.Context(), h.authManager, auth, method, req.URL)
 	resp, errDo := httpClient.Do(req)
 	if errDo != nil {
 		log.WithError(errDo).Debug("management APICall request failed")
@@ -232,6 +234,13 @@ func (h *Handler) APICall(c *gin.Context) {
 		return
 	}
 
+	if completeManualQuery != nil {
+		completeManualQuery(c.Request.Context(), quotahub.ManualQueryResponse{
+			StatusCode: resp.StatusCode,
+			ServerDate: resp.Header.Get("Date"),
+			Body:       respBody,
+		})
+	}
 	c.JSON(http.StatusOK, apiCallResponse{
 		StatusCode: resp.StatusCode,
 		Header:     resp.Header,
@@ -864,7 +873,8 @@ func (h *Handler) apiCallTransport(auth *coreauth.Auth, requestProxyURL string) 
 		}
 	}
 
-	return directAPICallTransport()
+	// No explicit proxy configured; respect environment proxy variables.
+	return http.DefaultTransport
 }
 
 func directAPICallTransport() http.RoundTripper {

@@ -11,7 +11,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/oagmsg"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/oagmsg"
 )
 
 var tinyPNG = []byte{

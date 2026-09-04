@@ -6,8 +6,8 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
-	agclaude "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/antigravity/claude"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	agclaude "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/antigravity/claude"
 	"github.com/tidwall/gjson"
 )
 

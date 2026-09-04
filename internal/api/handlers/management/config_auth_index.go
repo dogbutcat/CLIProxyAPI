@@ -6,6 +6,7 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/watcher/synthesizer"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 )
 
 type geminiKeyWithAuthIndex struct {
@@ -67,6 +68,14 @@ func (h *Handler) liveAuthIndexByID() map[string]string {
 	h.mu.Lock()
 	manager := h.authManager
 	h.mu.Unlock()
+	if manager == nil {
+		return out
+	}
+	return liveAuthIndexByIDFromManager(manager)
+}
+
+func liveAuthIndexByIDFromManager(manager *coreauth.Manager) map[string]string {
+	out := map[string]string{}
 	if manager == nil {
 		return out
 	}
