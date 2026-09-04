@@ -155,6 +155,8 @@ func (s *Service) registerModelsForAuthWithCache(ctx context.Context, a *coreaut
 			}
 		}
 		models = applyExcludedModels(models, excluded)
+	case openCodeGoProviderKey:
+		models = s.buildOpenCodeGoConfigModelsForAuth(a, excluded)
 	default:
 		// Handle OpenAI-compatibility providers by name using config
 		if s.cfg != nil {
@@ -262,7 +264,7 @@ func (s *Service) registerModelsForAuthWithCache(ctx context.Context, a *coreaut
 	if ctx.Err() != nil {
 		return
 	}
-	models = applyOAuthModelAliasForAuth(s.cfg, provider, authKind, a.Attributes, models)
+	models = applyOAuthModelAliasForAuth(s.cfg, provider, modelAliasAuthKind(provider, authKind), a.Attributes, models)
 	if ctx.Err() != nil {
 		return
 	}
@@ -374,30 +376,42 @@ func (s *Service) resolveConfigClaudeKey(auth *coreauth.Auth) *config.ClaudeKey 
 		entry := &s.cfg.ClaudeKey[i]
 		cfgKey := strings.TrimSpace(entry.APIKey)
 		cfgBase := strings.TrimSpace(entry.BaseURL)
-		if attrKey != "" && attrBase != "" {
-			if strings.EqualFold(cfgKey, attrKey) && strings.EqualFold(cfgBase, attrBase) {
+		if attrKey != "" {
+			if strings.EqualFold(cfgKey, attrKey) && claudeConfigBaseURLCompatible(cfgBase, attrBase) {
+				return entry
+			}
+			if matchClaudeAPIKeyEntry(entry, attrKey, attrBase) {
 				return entry
 			}
 			continue
-		}
-		if attrKey != "" && strings.EqualFold(cfgKey, attrKey) {
-			if cfgBase == "" || strings.EqualFold(cfgBase, attrBase) {
-				return entry
-			}
 		}
 		if attrKey == "" && attrBase != "" && strings.EqualFold(cfgBase, attrBase) {
 			return entry
 		}
 	}
-	if attrKey != "" {
-		for i := range s.cfg.ClaudeKey {
-			entry := &s.cfg.ClaudeKey[i]
-			if strings.EqualFold(strings.TrimSpace(entry.APIKey), attrKey) {
-				return entry
-			}
+	return nil
+}
+
+func matchClaudeAPIKeyEntry(entry *config.ClaudeKey, attrKey, attrBase string) bool {
+	if entry == nil || attrKey == "" {
+		return false
+	}
+	parentBase := strings.TrimSpace(entry.BaseURL)
+	for i := range entry.APIKeyEntries {
+		childKey := strings.TrimSpace(entry.APIKeyEntries[i].APIKey)
+		childBase := strings.TrimSpace(entry.APIKeyEntries[i].BaseURL)
+		if childBase == "" {
+			childBase = parentBase
+		}
+		if childKey != "" && strings.EqualFold(childKey, attrKey) && claudeConfigBaseURLCompatible(childBase, attrBase) {
+			return true
 		}
 	}
-	return nil
+	return false
+}
+
+func claudeConfigBaseURLCompatible(cfgBase, authBase string) bool {
+	return authBase == "" || cfgBase == "" || strings.EqualFold(cfgBase, authBase)
 }
 
 func (s *Service) resolveConfigGeminiKey(auth *coreauth.Auth) *config.GeminiKey {
@@ -903,6 +917,13 @@ func applyOAuthModelAliasForAuth(cfg *config.Config, provider, authKind string, 
 		return models
 	}
 	return applyOAuthModelAliasEntries(aliases, models)
+}
+
+func modelAliasAuthKind(provider, authKind string) string {
+	if isOpenCodeGoProvider(provider) {
+		return coreauth.AuthKindOAuth
+	}
+	return authKind
 }
 
 func oauthModelAliasesForAuth(cfg *config.Config, channel string, attributes map[string]string) []config.OAuthModelAlias {

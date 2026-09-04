@@ -25,6 +25,9 @@ type Config struct {
 	// CredentialInFlight configures credential observation snapshots.
 	CredentialInFlight CredentialInFlightConfig `yaml:"credential-in-flight" json:"credential-in-flight"`
 
+	// UsageImportSession configures resumable usage import session storage.
+	UsageImportSession UsageImportSessionConfig `yaml:"usage-import-session" json:"usage-import-session"`
+
 	// RemoteManagement nests management-related options under 'remote-management'.
 	RemoteManagement RemoteManagement `yaml:"remote-management" json:"-"`
 
@@ -148,9 +151,24 @@ type Config struct {
 	// OpenAICompatibility defines OpenAI API compatibility configurations for external providers.
 	OpenAICompatibility []OpenAICompatibility `yaml:"openai-compatibility" json:"openai-compatibility"`
 
+	// OpenCodeGo configures OpenCode Go provider credentials and quota polling.
+	OpenCodeGo OpenCodeGoConfig `yaml:"opencode-go,omitempty" json:"opencode-go,omitempty"`
+
+	// Vision configures image-to-text preprocessing for target models that do not
+	// support image input.
+	Vision VisionConfig `yaml:"vision,omitempty" json:"vision,omitempty"`
+
+	// LegacyVisionProxy accepts the original top-level vision-proxy block.
+	// NormalizeVisionConfig moves it into Vision when the canonical block is absent.
+	LegacyVisionProxy VisionConfig `yaml:"vision-proxy,omitempty" json:"-"`
+
 	// VertexCompatAPIKey defines Vertex AI-compatible API key configurations for third-party providers.
 	// Used for services that use Vertex AI-style paths but with simple API key authentication.
 	VertexCompatAPIKey []VertexCompatKey `yaml:"vertex-api-key" json:"vertex-api-key"`
+
+	// LegacyOpenCodeGoKeyGroups accepts the old top-level OpenCode Go key-groups
+	// representation. NormalizeOpenCodeGo moves these into OpenCodeGo.KeyGroups.
+	LegacyOpenCodeGoKeyGroups []OpenCodeGoKeyGroup `yaml:"key-groups,omitempty" json:"-"`
 
 	// OAuthExcludedModels defines per-provider global model exclusions applied to OAuth/file-backed auth entries.
 	OAuthExcludedModels map[string][]string `yaml:"oauth-excluded-models,omitempty" json:"oauth-excluded-models,omitempty"`

@@ -5,6 +5,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/watcher/synthesizer"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
@@ -29,6 +30,7 @@ type routingRuntimeState struct {
 	sessionAffinity          bool
 	sessionAffinityTTL       time.Duration
 	sessionAffinitySubagents bool
+	authDir                  string
 }
 
 func normalizedRoutingRuntimeState(cfg *config.Config) routingRuntimeState {
@@ -46,8 +48,11 @@ func normalizedRoutingRuntimeState(cfg *config.Config) routingRuntimeState {
 		state.strategy = "weighted-round-robin"
 	case "fill-first", "fillfirst", "ff":
 		state.strategy = "fill-first"
+	case "seq-random", "sequential-random", "seqrandom", "sr":
+		state.strategy = "seq-random"
 	}
 	state.sessionAffinity = cfg.Routing.SessionAffinity
+	state.authDir = strings.TrimSpace(cfg.AuthDir)
 	if ttl := strings.TrimSpace(cfg.Routing.SessionAffinityTTL); ttl != "" {
 		if parsed, errParse := time.ParseDuration(ttl); errParse == nil && parsed > 0 {
 			if parsed < time.Second {
@@ -69,6 +74,11 @@ func newRoutingSelector(state routingRuntimeState) coreauth.Selector {
 		selector = &coreauth.WeightedRoundRobinSelector{}
 	case "fill-first":
 		selector = &coreauth.FillFirstSelector{}
+	case "seq-random":
+		selector = &coreauth.SeqRandomStartSelector{}
+		if store := newPrefixHashStoreForRouting(state); store != nil {
+			selector = coreauth.NewCacheAwareSelector(selector, store)
+		}
 	default:
 		selector = &coreauth.RoundRobinSelector{}
 	}
@@ -81,6 +91,23 @@ func newRoutingSelector(state routingRuntimeState) coreauth.Selector {
 		})
 	}
 	return selector
+}
+
+func newPrefixHashStoreForRouting(state routingRuntimeState) *coreauth.PrefixHashStore {
+	if strings.TrimSpace(state.authDir) == "" {
+		return nil
+	}
+	authDir, errResolve := util.ResolveAuthDir(state.authDir)
+	if errResolve != nil {
+		log.Warnf("cache-aware routing disabled: resolve auth dir: %v", errResolve)
+		return nil
+	}
+	store, errStore := coreauth.NewPrefixHashStore(authDir, 0, 0)
+	if errStore != nil {
+		log.Warnf("cache-aware routing disabled: %v", errStore)
+		return nil
+	}
+	return store
 }
 
 func (s *Service) applyConfigUpdateWithAuthSynthesis(ctx context.Context, newCfg *config.Config, synthesizeConfigAuths bool) bool {
@@ -166,7 +193,6 @@ func (s *Service) applyConfigRuntime(ctx context.Context, commit configCommit, s
 	if errContext := ctx.Err(); errContext != nil {
 		return false
 	}
-
 	registrationCtx := coreauth.WithSkipPersist(ctx)
 	s.syncPluginRuntimeConfigForConfig(registrationCtx, cfg)
 	if errContext := ctx.Err(); errContext != nil {
@@ -198,6 +224,15 @@ func (s *Service) applyConfigRuntime(ctx context.Context, commit configCommit, s
 	if errContext := ctx.Err(); errContext != nil {
 		return false
 	}
+	// OpenCode Go quota observations must capture tickets against the newly
+	// synthesized key auths. Starting the poller before auth registration can
+	// discard the first fetch after a key identity or config reload.
+	if !s.syncOpenCodeRuntimeConfig(ctx, cfg) {
+		return false
+	}
+	if errContext := ctx.Err(); errContext != nil {
+		return false
+	}
 	s.syncPluginModelRuntime(registrationCtx)
 	return ctx.Err() == nil
 }
@@ -213,14 +248,15 @@ func (s *Service) applyManagerConfig(ctx context.Context, commit configCommit) b
 		return false
 	}
 	routingState := normalizedRoutingRuntimeState(commit.cfg)
-	if s.appliedRoutingState == nil || *s.appliedRoutingState != routingState {
-		s.coreManager.SetSelector(newRoutingSelector(routingState))
-		s.appliedRoutingState = &routingState
-	}
-	s.applyRetryConfig(commit.cfg)
+	routingChanged := s.appliedRoutingState == nil || *s.appliedRoutingState != routingState
 	store := s.resolveCooldownStateStore(commit.cfg)
 	if !s.coreManager.ApplyConfigWithCooldownStateStore(ctx, commit.cfg, store) {
 		return false
+	}
+	s.applyRetryConfig(commit.cfg)
+	if routingChanged {
+		s.coreManager.SetSelector(newRoutingSelector(routingState))
+		s.appliedRoutingState = &routingState
 	}
 	s.coreManager.SetOAuthModelAlias(commit.cfg.OAuthModelAlias)
 	return true
@@ -266,10 +302,14 @@ func (s *Service) registerConfigAPIKeyAuths(ctx context.Context, cfg *config.Con
 
 	registrationCtx := coreauth.WithDeferredAPIKeyModelAliasRebuild(ctx)
 	tasks := make([]modelRegistrationTask, 0, len(auths))
+	openCodeGoDesired := make(map[string]struct{})
 	needsAliasRebuild := false
 	for _, auth := range auths {
 		if !coreauth.IsConfigAPIKeyAuth(auth) {
 			continue
+		}
+		if isOpenCodeGoProvider(auth.Provider) {
+			openCodeGoDesired[auth.ID] = struct{}{}
 		}
 		prepared := s.prepareCoreAuthForModelRegistration(registrationCtx, auth)
 		if prepared == nil {
@@ -289,6 +329,28 @@ func (s *Service) registerConfigAPIKeyAuths(ctx context.Context, cfg *config.Con
 		s.coreManager.RefreshAPIKeyModelAlias()
 	}
 	s.runModelRegistrationTasks(registrationCtx, tasks)
+	s.removeStaleOpenCodeGoConfigAuths(registrationCtx, openCodeGoDesired)
+}
+
+func (s *Service) removeStaleOpenCodeGoConfigAuths(ctx context.Context, desired map[string]struct{}) {
+	if s == nil || s.coreManager == nil {
+		return
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if ctx.Err() != nil {
+		return
+	}
+	for _, auth := range s.coreManager.List() {
+		if ctx.Err() != nil || auth == nil || !isOpenCodeGoProvider(auth.Provider) || !coreauth.IsConfigAPIKeyAuth(auth) {
+			continue
+		}
+		if _, ok := desired[auth.ID]; ok {
+			continue
+		}
+		s.applyCoreAuthRemoval(ctx, auth.ID)
+	}
 }
 
 func forceHomeRuntimeConfig(cfg *config.Config) {

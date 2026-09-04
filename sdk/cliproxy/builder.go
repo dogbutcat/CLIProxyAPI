@@ -285,6 +285,8 @@ func (b *Builder) Build() (*Service, error) {
 	service.serverOptions = append(service.serverOptions,
 		api.WithPostAuthPersistHook(service.runtimeAuthSyncHook()),
 		api.WithPluginHost(pluginHost),
+		api.WithOpenCodeGoQuotaRuntime(&service.openCodeRuntime),
+		api.WithOpenCodeGoReferralRuntime(&service.openCodeRuntime),
 		api.WithConfigReloadHook(func(_ context.Context, _ *config.Config) {
 			service.reloadConfigFromWatcher()
 		}),

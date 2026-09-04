@@ -278,6 +278,66 @@ func TestConfigSynthesizer_ClaudeKeys(t *testing.T) {
 	}
 }
 
+func TestConfigSynthesizer_ClaudeKeys_APIKeyEntries(t *testing.T) {
+	weightParent := 3
+	weightChild := 7
+	synth := NewConfigSynthesizer()
+	ctx := &SynthesisContext{
+		Config: &config.Config{
+			ClaudeKey: []config.ClaudeKey{{
+				Name:                    "parent",
+				APIKey:                  "parent-key",
+				Weight:                  &weightParent,
+				Prefix:                  "team",
+				BaseURL:                 "https://parent.example.com",
+				ProxyURL:                "http://parent-proxy",
+				RebuildMidSystemMessage: true,
+				Models:                  []config.ClaudeModel{{Name: "claude-upstream", Alias: "claude-alias"}},
+				APIKeyEntries: []config.ClaudeAPIKeyEntry{{
+					Name:     "child",
+					APIKey:   "child-key",
+					Weight:   &weightChild,
+					BaseURL:  "https://child.example.com",
+					ProxyURL: "http://child-proxy",
+				}},
+			}},
+		},
+		Now:         time.Now(),
+		IDGenerator: NewStableIDGenerator(),
+	}
+
+	auths, err := synth.Synthesize(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(auths) != 2 {
+		t.Fatalf("auth count = %d, want 2", len(auths))
+	}
+	parent := auths[0]
+	child := auths[1]
+	if got := parent.Attributes[coreauth.AttributeWeight]; got != "3" {
+		t.Fatalf("parent weight = %q, want 3", got)
+	}
+	if got := child.Attributes[coreauth.AttributeWeight]; got != "7" {
+		t.Fatalf("child weight = %q, want 7", got)
+	}
+	if got := child.Attributes["display_name"]; got != "child" {
+		t.Fatalf("child display_name = %q, want child", got)
+	}
+	if got := child.Attributes["base_url"]; got != "https://child.example.com" {
+		t.Fatalf("child base_url = %q", got)
+	}
+	if child.ProxyURL != "http://child-proxy" {
+		t.Fatalf("child ProxyURL = %q", child.ProxyURL)
+	}
+	if child.Prefix != "team" {
+		t.Fatalf("child Prefix = %q", child.Prefix)
+	}
+	if child.Attributes["config_index"] != "0" || child.Attributes["models_hash"] == "" || child.Attributes["rebuild_mid_system_message"] != "true" {
+		t.Fatalf("child inherited attrs = %#v", child.Attributes)
+	}
+}
+
 func TestConfigSynthesizer_ClaudeKeys_SkipsEmptyAndHeaders(t *testing.T) {
 	synth := NewConfigSynthesizer()
 	ctx := &SynthesisContext{
@@ -730,6 +790,82 @@ func TestConfigSynthesizer_OpenAICompat_UsesNamespacedProviderKey(t *testing.T) 
 	}
 	if auth.Attributes["config_index"] != "0" {
 		t.Fatalf("config_index = %q, want 0", auth.Attributes["config_index"])
+	}
+}
+
+func TestConfigSynthesizer_OpenAICompatPromptCacheKeyDuplicateConfigIndex(t *testing.T) {
+	synth := NewConfigSynthesizer()
+	ctx := &SynthesisContext{
+		Config: &config.Config{
+			OpenAICompatibility: []config.OpenAICompatibility{
+				{
+					Name:                  "duplicate",
+					BaseURL:               "https://first.example.com/v1",
+					SupportPromptCacheKey: false,
+					APIKeyEntries:         []config.OpenAICompatibilityAPIKey{{APIKey: "key-first"}},
+				},
+				{
+					Name:                  "duplicate",
+					BaseURL:               "https://second.example.com/v1",
+					SupportPromptCacheKey: true,
+					APIKeyEntries:         []config.OpenAICompatibilityAPIKey{{APIKey: "key-second"}},
+				},
+			},
+		},
+		Now:         time.Now(),
+		IDGenerator: NewStableIDGenerator(),
+	}
+
+	auths, err := synth.Synthesize(ctx)
+	if err != nil {
+		t.Fatalf("Synthesize() error = %v", err)
+	}
+	if len(auths) != 2 {
+		t.Fatalf("auth count = %d, want 2", len(auths))
+	}
+	byKey := map[string]*coreauth.Auth{}
+	for _, auth := range auths {
+		byKey[auth.Attributes["api_key"]] = auth
+	}
+	if got := byKey["key-first"].Attributes["config_index"]; got != "0" {
+		t.Fatalf("first duplicate config_index = %q, want 0", got)
+	}
+	if got := byKey["key-second"].Attributes["config_index"]; got != "1" {
+		t.Fatalf("second duplicate config_index = %q, want 1", got)
+	}
+	if _, ok := byKey["key-first"].Metadata["support_prompt_cache_key"]; ok {
+		t.Fatal("first duplicate has support_prompt_cache_key metadata for false config")
+	}
+	if got, ok := byKey["key-second"].Metadata["support_prompt_cache_key"].(bool); !ok || !got {
+		t.Fatalf("second duplicate support_prompt_cache_key metadata = %v/%v, want true", got, ok)
+	}
+}
+
+func TestConfigSynthesizer_OpenAICompatPromptCacheKeyFallbackMetadata(t *testing.T) {
+	synth := NewConfigSynthesizer()
+	ctx := &SynthesisContext{
+		Config: &config.Config{
+			OpenAICompatibility: []config.OpenAICompatibility{
+				{
+					Name:                  "fallback",
+					BaseURL:               "https://fallback.example.com/v1",
+					SupportPromptCacheKey: true,
+				},
+			},
+		},
+		Now:         time.Now(),
+		IDGenerator: NewStableIDGenerator(),
+	}
+
+	auths, err := synth.Synthesize(ctx)
+	if err != nil {
+		t.Fatalf("Synthesize() error = %v", err)
+	}
+	if len(auths) != 1 {
+		t.Fatalf("auth count = %d, want 1", len(auths))
+	}
+	if got, ok := auths[0].Metadata["support_prompt_cache_key"].(bool); !ok || !got {
+		t.Fatalf("fallback support_prompt_cache_key metadata = %v/%v, want true", got, ok)
 	}
 }
 

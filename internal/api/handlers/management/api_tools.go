@@ -12,6 +12,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	quotahub "github.com/router-for-me/CLIProxyAPI/v7/internal/quota/hub"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/proxyutil"
 	log "github.com/sirupsen/logrus"
@@ -189,6 +190,7 @@ func (h *Handler) APICall(c *gin.Context) {
 	}
 	httpClient.Transport = h.apiCallTransport(auth, requestProxyURL)
 
+	completeManualQuery := quotahub.BeginManualQuery(c.Request.Context(), h.authManager, auth, method, req.URL)
 	resp, errDo := httpClient.Do(req)
 	if errDo != nil {
 		log.WithError(errDo).Debug("management APICall request failed")
@@ -207,6 +209,13 @@ func (h *Handler) APICall(c *gin.Context) {
 		return
 	}
 
+	if completeManualQuery != nil {
+		completeManualQuery(c.Request.Context(), quotahub.ManualQueryResponse{
+			StatusCode: resp.StatusCode,
+			ServerDate: resp.Header.Get("Date"),
+			Body:       respBody,
+		})
+	}
 	c.JSON(http.StatusOK, apiCallResponse{
 		StatusCode: resp.StatusCode,
 		Header:     resp.Header,
@@ -512,7 +521,9 @@ func (h *Handler) apiCallTransport(auth *coreauth.Auth, requestProxyURL string) 
 		}
 	}
 
-	return directAPICallTransport()
+	// No explicit proxy configured — fall back to the default transport which
+	// respects environment proxy variables (HTTPS_PROXY, HTTP_PROXY, etc.).
+	return http.DefaultTransport
 }
 
 func directAPICallTransport() http.RoundTripper {

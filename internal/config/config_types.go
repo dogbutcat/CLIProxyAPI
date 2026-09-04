@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/json"
 	"fmt"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
@@ -146,7 +147,8 @@ type AntigravityConfig struct {
 // CodexConfig configures provider-wide Codex request behavior.
 type CodexConfig struct {
 	IdentityConfuse bool `yaml:"identity-confuse" json:"identity-confuse"`
-	// DisableCodexCloaking disables forcing the official Codex identity headers on HTTP/SSE and WebSocket requests.
+	// DisableCodexCloaking disables the final official User-Agent/Originator override on HTTP/SSE and WebSocket requests.
+	// Custom credential headers still apply before this policy.
 	DisableCodexCloaking bool `yaml:"disable-codex-cloaking" json:"disable-codex-cloaking"`
 	// StreamBootstrapBuffering holds back initial handshake events (response.created,
 	// response.in_progress and the websocket metadata frames) until the first generated event
@@ -180,6 +182,77 @@ type CodexLiveICEServer struct {
 	URLs       []string `yaml:"urls" json:"urls"`
 	Username   string   `yaml:"username" json:"-"`
 	Credential string   `yaml:"credential" json:"-"`
+}
+
+// VisionConfig configures image-to-text preprocessing for requests whose target
+// model does not support image input. Legacy timeout-ms is accepted and ignored.
+type VisionConfig struct {
+	Enabled  bool                 `yaml:"enabled" json:"enabled"`
+	Model    string               `yaml:"model" json:"model"`
+	Fallback string               `yaml:"fallback,omitempty" json:"fallback,omitempty"`
+	Provider VisionProviderConfig `yaml:"provider" json:"provider"`
+	Scope    string               `yaml:"scope,omitempty" json:"scope,omitempty"`
+	Include  []string             `yaml:"include,omitempty" json:"include,omitempty"`
+	Exclude  []string             `yaml:"exclude,omitempty" json:"exclude,omitempty"`
+
+	configured bool
+}
+
+// UnmarshalYAML accepts canonical vision keys and selected legacy names from
+// the original vision-proxy experiment.
+func (c *VisionConfig) UnmarshalYAML(value *yaml.Node) error {
+	if c == nil || value == nil || value.Kind == 0 {
+		return nil
+	}
+	c.configured = true
+	type rawVisionConfig struct {
+		Enabled         bool                 `yaml:"enabled"`
+		Model           string               `yaml:"model"`
+		Fallback        string               `yaml:"fallback"`
+		FallbackModel   string               `yaml:"fallback-model"`
+		Provider        VisionProviderConfig `yaml:"provider"`
+		Scope           string               `yaml:"scope"`
+		ImageScope      string               `yaml:"image-scope"`
+		Include         []string             `yaml:"include"`
+		IncludeModels   []string             `yaml:"include-models"`
+		Exclude         []string             `yaml:"exclude"`
+		ExcludeModels   []string             `yaml:"exclude-models"`
+		LegacyTimeoutMs int                  `yaml:"timeout-ms"`
+	}
+	var raw rawVisionConfig
+	if errDecode := value.Decode(&raw); errDecode != nil {
+		return fmt.Errorf("parse vision config: %w", errDecode)
+	}
+	c.Enabled = raw.Enabled
+	c.Model = raw.Model
+	c.Fallback = raw.Fallback
+	if c.Fallback == "" {
+		c.Fallback = raw.FallbackModel
+	}
+	c.Provider = raw.Provider
+	c.Scope = raw.Scope
+	if c.Scope == "" {
+		c.Scope = raw.ImageScope
+	}
+	c.Include = raw.Include
+	if len(c.Include) == 0 {
+		c.Include = raw.IncludeModels
+	}
+	c.Exclude = raw.Exclude
+	if len(c.Exclude) == 0 {
+		c.Exclude = raw.ExcludeModels
+	}
+	_ = raw.LegacyTimeoutMs
+	return nil
+}
+
+// VisionProviderConfig identifies the configured vision provider.
+type VisionProviderConfig struct {
+	Name     string            `yaml:"name,omitempty" json:"name,omitempty"`
+	BaseURL  string            `yaml:"base-url,omitempty" json:"base-url,omitempty"`
+	APIKey   string            `yaml:"api-key,omitempty" json:"-"`
+	Protocol string            `yaml:"protocol,omitempty" json:"protocol,omitempty"`
+	Headers  map[string]string `yaml:"headers,omitempty" json:"headers,omitempty"`
 }
 
 // TLSConfig holds HTTPS server settings.
@@ -234,7 +307,7 @@ type QuotaExceeded struct {
 // RoutingConfig configures how credentials are selected for requests.
 type RoutingConfig struct {
 	// Strategy selects the credential selection strategy.
-	// Supported values: "round-robin" (default), "weighted-round-robin", "fill-first".
+	// Supported values: "round-robin" (default), "weighted-round-robin", "fill-first", "seq-random".
 	Strategy string `yaml:"strategy,omitempty" json:"strategy,omitempty"`
 
 	// SessionAffinity enables universal session-sticky routing for all clients.
@@ -254,6 +327,14 @@ type RoutingConfig struct {
 	// When false, subagents are distributed across the credential pool via the fallback selector.
 	// Default: true. Ignored when SessionAffinity is false.
 	SessionAffinitySubagents *bool `yaml:"session-affinity-subagents,omitempty" json:"session-affinity-subagents,omitempty"`
+
+	// OpenCodeGoPollInterval is the legacy location for OpenCode Go quota polling.
+	// NormalizeOpenCodeGo moves it into opencode-go.quota.poll-interval.
+	OpenCodeGoPollInterval string `yaml:"opencode-go-poll-interval,omitempty" json:"-"`
+
+	// OpenCodeGoPollThreshold is the legacy location for OpenCode Go quota threshold.
+	// NormalizeOpenCodeGo moves it into opencode-go.quota.threshold.
+	OpenCodeGoPollThreshold *float64 `yaml:"opencode-go-poll-threshold,omitempty" json:"-"`
 }
 
 // OAuthModelAlias defines a model ID alias for a specific channel.
@@ -349,8 +430,17 @@ type CloakConfig struct {
 // ClaudeKey represents the configuration for a Claude API key,
 // including the API key itself and an optional base URL for the API endpoint.
 type ClaudeKey struct {
+	// Name is an optional display label shared by generated auth entries.
+	Name string `yaml:"name,omitempty" json:"name,omitempty"`
+
+	// Disabled prevents this Claude key group from being used for routing.
+	Disabled bool `yaml:"disabled,omitempty" json:"disabled,omitempty"`
+
 	// APIKey is the authentication key for accessing Claude API services.
 	APIKey string `yaml:"api-key" json:"api-key"`
+
+	// APIKeyEntries defines additional Claude API keys that inherit parent settings.
+	APIKeyEntries []ClaudeAPIKeyEntry `yaml:"api-key-entries,omitempty" json:"api-key-entries,omitempty"`
 
 	// Priority controls selection preference when multiple credentials match.
 	// Higher values are preferred; defaults to 0.
@@ -423,6 +513,28 @@ func (k ClaudeKey) GetBaseURL() string { return k.BaseURL }
 func (k ClaudeKey) GetPrefix() string { return k.Prefix }
 
 func (k ClaudeKey) GetProxyURL() string { return k.ProxyURL }
+
+// ClaudeAPIKeyEntry represents a child Claude API key with optional overrides.
+type ClaudeAPIKeyEntry struct {
+	// Name is an optional display label for the generated auth entry.
+	Name string `yaml:"name,omitempty" json:"name,omitempty"`
+
+	// Disabled prevents this child API key from being used for routing.
+	Disabled bool `yaml:"disabled,omitempty" json:"disabled,omitempty"`
+
+	// APIKey is the authentication key for accessing Claude API services.
+	APIKey string `yaml:"api-key" json:"api-key"`
+
+	// Weight controls proportional selection under weighted-round-robin.
+	// When omitted, the parent ClaudeKey weight is inherited.
+	Weight *int `yaml:"weight,omitempty" json:"weight,omitempty"`
+
+	// BaseURL overrides the parent base URL for this API key if provided.
+	BaseURL string `yaml:"base-url,omitempty" json:"base-url,omitempty"`
+
+	// ProxyURL overrides the parent proxy setting for this API key if provided.
+	ProxyURL string `yaml:"proxy-url,omitempty" json:"proxy-url,omitempty"`
+}
 
 // ClaudeModel describes a mapping between an alias and the actual upstream model name.
 type ClaudeModel struct {
@@ -756,3 +868,234 @@ func (m OpenAICompatibilityModel) GetForceMapping() bool    { return m.ForceMapp
 func (m OpenAICompatibilityModel) GetIsCompat() bool        { return m.IsCompat }
 
 func (m OpenAICompatibilityModel) GetThinking() *registry.ThinkingSupport { return m.Thinking }
+
+// OpenCodeGoConfig is the canonical provider-scoped OpenCode Go configuration.
+type OpenCodeGoConfig struct {
+	// KeyGroups defines groups of account keys sharing protocol-level settings.
+	KeyGroups []OpenCodeGoKeyGroup `yaml:"key-groups,omitempty" json:"key-groups,omitempty"`
+
+	// Quota configures optional background quota polling.
+	Quota OpenCodeGoQuotaConfig `yaml:"quota,omitempty" json:"quota,omitempty"`
+}
+
+// UnmarshalYAML accepts the canonical provider object and the older flat
+// opencode-go sequence shape from early OpenCode Go config experiments.
+func (c *OpenCodeGoConfig) UnmarshalYAML(value *yaml.Node) error {
+	if c == nil || value == nil {
+		return nil
+	}
+	switch value.Kind {
+	case yaml.MappingNode:
+		type raw OpenCodeGoConfig
+		var decoded raw
+		if errDecode := value.Decode(&decoded); errDecode != nil {
+			return errDecode
+		}
+		*c = OpenCodeGoConfig(decoded)
+		return nil
+	case yaml.SequenceNode:
+		var legacy []OpenCodeGo
+		if errDecode := value.Decode(&legacy); errDecode != nil {
+			return errDecode
+		}
+		c.KeyGroups = legacyOpenCodeGoEntriesToKeyGroups(legacy)
+		return nil
+	default:
+		return fmt.Errorf("opencode-go must be an object or legacy list")
+	}
+}
+
+// OpenCodeGoQuotaConfig controls OpenCode Go quota polling behavior.
+type OpenCodeGoQuotaConfig struct {
+	// PollInterval controls how often quota is polled. Empty means the poller default.
+	PollInterval string `yaml:"poll-interval,omitempty" json:"poll-interval,omitempty"`
+
+	// Threshold marks credentials as exhausted when percentRemaining is at or below this value.
+	Threshold *float64 `yaml:"threshold,omitempty" json:"threshold,omitempty"`
+}
+
+// IsZero lets YAML omitempty suppress an absent OpenCode Go provider block.
+func (c OpenCodeGoConfig) IsZero() bool {
+	return len(c.KeyGroups) == 0 && c.Quota.IsZero()
+}
+
+// IsZero lets YAML omitempty suppress an absent quota block.
+func (c OpenCodeGoQuotaConfig) IsZero() bool {
+	return c.PollInterval == "" && c.Threshold == nil
+}
+
+// OpenCodeGoKeyGroup represents a group of OpenCode Go keys sharing common
+// protocol configurations.
+type OpenCodeGoKeyGroup struct {
+	// NamePrefix is the common prefix for generated entry names.
+	NamePrefix string `yaml:"name-prefix" json:"name-prefix"`
+
+	// Disabled prevents all entries in this group from being used for routing.
+	Disabled bool `yaml:"disabled,omitempty" json:"disabled,omitempty"`
+
+	// DisableCooling disables auth/model cooldown scheduling for all entries.
+	DisableCooling bool `yaml:"disable-cooling,omitempty" json:"disable-cooling,omitempty"`
+
+	// Headers optionally adds extra HTTP headers for all requests in this group.
+	Headers map[string]string `yaml:"headers,omitempty" json:"headers,omitempty"`
+
+	// OpenAI defines the OpenAI-compatible endpoint and models.
+	OpenAI *OpenCodeGoProtocolConfig `yaml:"openai,omitempty" json:"openai,omitempty"`
+
+	// Anthropic defines the Claude/Anthropic-compatible endpoint and models.
+	Anthropic *OpenCodeGoProtocolConfig `yaml:"anthropic,omitempty" json:"anthropic,omitempty"`
+
+	// Keys lists account credentials in this group.
+	Keys []OpenCodeGoKeyEntry `yaml:"keys" json:"keys"`
+}
+
+// OpenCodeGoProtocolConfig defines protocol-level settings shared by keys in a group.
+type OpenCodeGoProtocolConfig struct {
+	// NameSuffix is appended to generated entry names.
+	NameSuffix string `yaml:"name-suffix,omitempty" json:"name-suffix,omitempty"`
+
+	// BaseURL is the API endpoint for this protocol.
+	BaseURL string `yaml:"base-url" json:"base-url"`
+
+	// Prefix optionally namespaces models.
+	Prefix string `yaml:"prefix,omitempty" json:"prefix,omitempty"`
+
+	// Priority controls selection preference. Higher values are preferred.
+	Priority int `yaml:"priority,omitempty" json:"priority,omitempty"`
+
+	// Models is the list of model entries available through this protocol.
+	Models []OpenCodeGoModelEntry `yaml:"models,omitempty" json:"models,omitempty"`
+}
+
+// ModelNames returns the configured upstream model names without aliases.
+func (pc *OpenCodeGoProtocolConfig) ModelNames() []string {
+	if pc == nil {
+		return nil
+	}
+	out := make([]string, 0, len(pc.Models))
+	for _, model := range pc.Models {
+		if model.Name != "" {
+			out = append(out, model.Name)
+		}
+	}
+	return out
+}
+
+// OpenCodeGoModelEntry represents a single model in an OpenCode Go protocol config.
+type OpenCodeGoModelEntry struct {
+	// Name is the upstream model name.
+	Name string `yaml:"name" json:"name"`
+
+	// Alias is the optional client-facing model name.
+	Alias string `yaml:"alias,omitempty" json:"alias,omitempty"`
+}
+
+// UnmarshalYAML allows model entries to be strings or objects.
+func (m *OpenCodeGoModelEntry) UnmarshalYAML(value *yaml.Node) error {
+	if m == nil || value == nil {
+		return nil
+	}
+	switch value.Kind {
+	case yaml.ScalarNode:
+		var name string
+		if errDecode := value.Decode(&name); errDecode != nil {
+			return errDecode
+		}
+		*m = OpenCodeGoModelEntry{Name: name}
+		return nil
+	case yaml.MappingNode:
+		type raw OpenCodeGoModelEntry
+		var decoded raw
+		if errDecode := value.Decode(&decoded); errDecode != nil {
+			return errDecode
+		}
+		*m = OpenCodeGoModelEntry(decoded)
+		return nil
+	default:
+		return fmt.Errorf("opencode-go model must be a string or object")
+	}
+}
+
+// MarshalYAML emits string form unless alias is configured.
+func (m OpenCodeGoModelEntry) MarshalYAML() (any, error) {
+	if m.Alias == "" {
+		return m.Name, nil
+	}
+	type raw OpenCodeGoModelEntry
+	return raw(m), nil
+}
+
+// UnmarshalJSON allows model entries to be strings or objects.
+func (m *OpenCodeGoModelEntry) UnmarshalJSON(data []byte) error {
+	var name string
+	if errUnmarshal := json.Unmarshal(data, &name); errUnmarshal == nil {
+		*m = OpenCodeGoModelEntry{Name: name}
+		return nil
+	}
+	type raw OpenCodeGoModelEntry
+	var decoded raw
+	if errUnmarshal := json.Unmarshal(data, &decoded); errUnmarshal != nil {
+		return errUnmarshal
+	}
+	*m = OpenCodeGoModelEntry(decoded)
+	return nil
+}
+
+// MarshalJSON emits string form unless alias is configured.
+func (m OpenCodeGoModelEntry) MarshalJSON() ([]byte, error) {
+	if m.Alias == "" {
+		return json.Marshal(m.Name)
+	}
+	type raw OpenCodeGoModelEntry
+	return json.Marshal(raw(m))
+}
+
+// OpenCodeGoKeyEntry represents a single account credential in a key group.
+type OpenCodeGoKeyEntry struct {
+	// KeyName is the account identifier used in generated auth names.
+	KeyName string `yaml:"key-name" json:"key-name"`
+
+	// APIKey is the OpenCode Go API key.
+	APIKey string `yaml:"api-key" json:"api-key"`
+
+	// ProxyURL overrides the global proxy setting for this key.
+	ProxyURL string `yaml:"proxy-url,omitempty" json:"proxy-url,omitempty"`
+
+	// WorkspaceID is the OpenCode Go workspace identifier for quota polling.
+	WorkspaceID string `yaml:"workspace-id,omitempty" json:"workspace-id,omitempty"`
+
+	// AuthCookie is the session cookie used for quota polling.
+	AuthCookie string `yaml:"auth-cookie,omitempty" json:"-"`
+}
+
+// OpenCodeGo is the legacy flat OpenCode Go entry shape.
+type OpenCodeGo struct {
+	Name           string            `yaml:"name" json:"name"`
+	APIKey         string            `yaml:"api-key" json:"api-key"`
+	BaseURL        string            `yaml:"base-url" json:"base-url"`
+	Protocol       string            `yaml:"protocol,omitempty" json:"protocol,omitempty"`
+	ProxyURL       string            `yaml:"proxy-url,omitempty" json:"proxy-url,omitempty"`
+	Prefix         string            `yaml:"prefix,omitempty" json:"prefix,omitempty"`
+	Priority       int               `yaml:"priority,omitempty" json:"priority,omitempty"`
+	Disabled       bool              `yaml:"disabled,omitempty" json:"disabled,omitempty"`
+	DisableCooling bool              `yaml:"disable-cooling,omitempty" json:"disable-cooling,omitempty"`
+	WorkspaceID    string            `yaml:"workspace-id,omitempty" json:"workspace-id,omitempty"`
+	AuthCookie     string            `yaml:"auth-cookie,omitempty" json:"-"`
+	Models         []OpenCodeGoModel `yaml:"models,omitempty" json:"models,omitempty"`
+	Headers        map[string]string `yaml:"headers,omitempty" json:"headers,omitempty"`
+	MaxMessages    int               `yaml:"max-messages,omitempty" json:"max-messages,omitempty"`
+	MaxBodySize    int               `yaml:"max-body-size,omitempty" json:"max-body-size,omitempty"`
+}
+
+// OpenCodeGoModel is the legacy flat model mapping shape.
+type OpenCodeGoModel struct {
+	Name         string `yaml:"name" json:"name"`
+	Alias        string `yaml:"alias,omitempty" json:"alias,omitempty"`
+	DisplayName  string `yaml:"display-name,omitempty" json:"display-name,omitempty"`
+	ForceMapping bool   `yaml:"force-mapping,omitempty" json:"force-mapping,omitempty"`
+}
+
+func (m OpenCodeGoModel) GetName() string        { return m.Name }
+func (m OpenCodeGoModel) GetAlias() string       { return m.Alias }
+func (m OpenCodeGoModel) GetDisplayName() string { return m.DisplayName }
+func (m OpenCodeGoModel) GetForceMapping() bool  { return m.ForceMapping }

@@ -33,6 +33,34 @@ func (cfg *Config) NormalizePluginsConfig() {
 	}
 }
 
+// NormalizeRoutingStrategy returns the canonical routing strategy for known aliases.
+func NormalizeRoutingStrategy(strategy string) (string, bool) {
+	normalized := strings.ToLower(strings.TrimSpace(strategy))
+	switch normalized {
+	case "", "round-robin", "roundrobin", "rr":
+		return "round-robin", true
+	case "weighted-round-robin", "weightedroundrobin", "wrr":
+		return "weighted-round-robin", true
+	case "fill-first", "fillfirst", "ff":
+		return "fill-first", true
+	case "seq-random", "sequential-random", "seqrandom", "sr":
+		return "seq-random", true
+	default:
+		return "", false
+	}
+}
+
+// NormalizeRoutingConfig canonicalizes known routing aliases and preserves
+// unknown strategies for upstream validation/runtime behavior.
+func (cfg *Config) NormalizeRoutingConfig() {
+	if cfg == nil {
+		return
+	}
+	if strategy, ok := NormalizeRoutingStrategy(cfg.Routing.Strategy); ok {
+		cfg.Routing.Strategy = strategy
+	}
+}
+
 // SanitizeCodexHeaderDefaults trims surrounding whitespace from the
 // configured Codex header fallback values.
 func (cfg *Config) SanitizeCodexHeaderDefaults() {
@@ -56,6 +84,63 @@ func (cfg *Config) SanitizeClaudeHeaderDefaults() {
 	cfg.ClaudeHeaderDefaults.Arch = strings.TrimSpace(cfg.ClaudeHeaderDefaults.Arch)
 	cfg.ClaudeHeaderDefaults.Timeout = strings.TrimSpace(cfg.ClaudeHeaderDefaults.Timeout)
 	cfg.ClaudeHeaderDefaults.Timezone = strings.TrimSpace(cfg.ClaudeHeaderDefaults.Timezone)
+}
+
+// NormalizeVisionConfig migrates the original vision-proxy block into the
+// canonical vision block when the canonical block is absent.
+func (cfg *Config) NormalizeVisionConfig() {
+	if cfg == nil {
+		return
+	}
+	if !cfg.Vision.configured && cfg.LegacyVisionProxy.configured {
+		cfg.Vision = cfg.LegacyVisionProxy
+	}
+}
+
+// SanitizeVisionConfig trims and canonicalizes vision preprocessing settings.
+func (cfg *Config) SanitizeVisionConfig() {
+	if cfg == nil {
+		return
+	}
+	cfg.NormalizeVisionConfig()
+	cfg.Vision.Model = strings.TrimSpace(cfg.Vision.Model)
+	cfg.Vision.Fallback = strings.TrimSpace(cfg.Vision.Fallback)
+	cfg.Vision.Scope = strings.ToLower(strings.TrimSpace(cfg.Vision.Scope))
+	switch cfg.Vision.Scope {
+	case "", "latest":
+		cfg.Vision.Scope = "latest"
+	case "all":
+		cfg.Vision.Scope = "all"
+	default:
+		cfg.Vision.Scope = "latest"
+	}
+	cfg.Vision.Include = normalizeVisionModelPatterns(cfg.Vision.Include)
+	cfg.Vision.Exclude = normalizeVisionModelPatterns(cfg.Vision.Exclude)
+	cfg.Vision.Provider.Name = strings.TrimSpace(cfg.Vision.Provider.Name)
+	cfg.Vision.Provider.BaseURL = strings.TrimRight(strings.TrimSpace(cfg.Vision.Provider.BaseURL), "/")
+	cfg.Vision.Provider.APIKey = strings.TrimSpace(cfg.Vision.Provider.APIKey)
+	cfg.Vision.Provider.Protocol = strings.ToLower(strings.TrimSpace(cfg.Vision.Provider.Protocol))
+	cfg.Vision.Provider.Headers = NormalizeHeaders(cfg.Vision.Provider.Headers)
+}
+
+func normalizeVisionModelPatterns(patterns []string) []string {
+	if len(patterns) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(patterns))
+	seen := make(map[string]struct{}, len(patterns))
+	for _, pattern := range patterns {
+		pattern = strings.ToLower(strings.TrimSpace(pattern))
+		if pattern == "" {
+			continue
+		}
+		if _, ok := seen[pattern]; ok {
+			continue
+		}
+		seen[pattern] = struct{}{}
+		out = append(out, pattern)
+	}
+	return out
 }
 
 // SanitizeOAuthModelAlias normalizes and deduplicates global OAuth model name aliases.
@@ -173,6 +258,136 @@ func (cfg *Config) SanitizeOpenAICompatibility() {
 	cfg.OpenAICompatibility = out
 }
 
+// NormalizeOpenCodeGo moves legacy OpenCode Go settings into the canonical
+// provider-scoped block and trims non-secret routing fields.
+func (cfg *Config) NormalizeOpenCodeGo() {
+	if cfg == nil {
+		return
+	}
+	if len(cfg.LegacyOpenCodeGoKeyGroups) > 0 {
+		cfg.OpenCodeGo.KeyGroups = append(cfg.OpenCodeGo.KeyGroups, cfg.LegacyOpenCodeGoKeyGroups...)
+		cfg.LegacyOpenCodeGoKeyGroups = nil
+	}
+	if interval := strings.TrimSpace(cfg.Routing.OpenCodeGoPollInterval); interval != "" && cfg.OpenCodeGo.Quota.PollInterval == "" {
+		cfg.OpenCodeGo.Quota.PollInterval = interval
+	}
+	if cfg.Routing.OpenCodeGoPollThreshold != nil && cfg.OpenCodeGo.Quota.Threshold == nil {
+		threshold := *cfg.Routing.OpenCodeGoPollThreshold
+		cfg.OpenCodeGo.Quota.Threshold = &threshold
+	}
+	cfg.Routing.OpenCodeGoPollInterval = ""
+	cfg.Routing.OpenCodeGoPollThreshold = nil
+
+	cfg.OpenCodeGo.Quota.PollInterval = strings.TrimSpace(cfg.OpenCodeGo.Quota.PollInterval)
+	cfg.normalizeOpenCodeGoKeyGroups()
+}
+
+func (cfg *Config) normalizeOpenCodeGoKeyGroups() {
+	if len(cfg.OpenCodeGo.KeyGroups) == 0 {
+		return
+	}
+	for groupIndex := range cfg.OpenCodeGo.KeyGroups {
+		group := &cfg.OpenCodeGo.KeyGroups[groupIndex]
+		group.NamePrefix = strings.TrimSpace(group.NamePrefix)
+		if group.NamePrefix == "" {
+			group.NamePrefix = "opencode-go"
+		}
+		group.Headers = NormalizeHeaders(group.Headers)
+		if group.OpenAI != nil {
+			normalizeOpenCodeGoProtocolConfig(group.OpenAI, "openai")
+		}
+		if group.Anthropic != nil {
+			normalizeOpenCodeGoProtocolConfig(group.Anthropic, "claude")
+		}
+		for keyIndex := range group.Keys {
+			key := &group.Keys[keyIndex]
+			key.KeyName = strings.TrimSpace(key.KeyName)
+			key.APIKey = strings.TrimSpace(key.APIKey)
+			key.ProxyURL = strings.TrimSpace(key.ProxyURL)
+			key.WorkspaceID = strings.TrimSpace(key.WorkspaceID)
+			key.AuthCookie = strings.TrimSpace(key.AuthCookie)
+		}
+	}
+}
+
+func normalizeOpenCodeGoProtocolConfig(protocol *OpenCodeGoProtocolConfig, defaultSuffix string) {
+	if protocol == nil {
+		return
+	}
+	protocol.NameSuffix = strings.TrimSpace(protocol.NameSuffix)
+	if protocol.NameSuffix == "" {
+		protocol.NameSuffix = defaultSuffix
+	}
+	protocol.BaseURL = strings.TrimSpace(protocol.BaseURL)
+	protocol.Prefix = normalizeModelPrefix(protocol.Prefix)
+	cleanModels := make([]OpenCodeGoModelEntry, 0, len(protocol.Models))
+	for _, model := range protocol.Models {
+		model.Name = strings.TrimSpace(model.Name)
+		model.Alias = strings.TrimSpace(model.Alias)
+		if model.Name == "" {
+			continue
+		}
+		cleanModels = append(cleanModels, model)
+	}
+	protocol.Models = cleanModels
+}
+
+func legacyOpenCodeGoEntriesToKeyGroups(entries []OpenCodeGo) []OpenCodeGoKeyGroup {
+	if len(entries) == 0 {
+		return nil
+	}
+	groups := make([]OpenCodeGoKeyGroup, 0, len(entries))
+	for _, entry := range entries {
+		protocolName := normalizeOpenCodeGoProtocol(entry.Protocol, entry.Name)
+		models := make([]OpenCodeGoModelEntry, 0, len(entry.Models))
+		for _, model := range entry.Models {
+			models = append(models, OpenCodeGoModelEntry{Name: model.Name, Alias: model.Alias})
+		}
+		protocol := &OpenCodeGoProtocolConfig{
+			NameSuffix: protocolName,
+			BaseURL:    entry.BaseURL,
+			Prefix:     entry.Prefix,
+			Priority:   entry.Priority,
+			Models:     models,
+		}
+		group := OpenCodeGoKeyGroup{
+			NamePrefix:     "opencode-go",
+			Disabled:       entry.Disabled,
+			DisableCooling: entry.DisableCooling,
+			Headers:        entry.Headers,
+			Keys: []OpenCodeGoKeyEntry{{
+				KeyName:     entry.Name,
+				APIKey:      entry.APIKey,
+				ProxyURL:    entry.ProxyURL,
+				WorkspaceID: entry.WorkspaceID,
+				AuthCookie:  entry.AuthCookie,
+			}},
+		}
+		if protocolName == "claude" {
+			group.Anthropic = protocol
+		} else {
+			group.OpenAI = protocol
+		}
+		groups = append(groups, group)
+	}
+	return groups
+}
+
+func normalizeOpenCodeGoProtocol(protocol string, name string) string {
+	trimmed := strings.ToLower(strings.TrimSpace(protocol))
+	if trimmed == "claude" || trimmed == "anthropic" {
+		return "claude"
+	}
+	if trimmed == "openai" {
+		return "openai"
+	}
+	lowerName := strings.ToLower(strings.TrimSpace(name))
+	if strings.HasSuffix(lowerName, "-claude") || strings.HasSuffix(lowerName, "-anthropic") {
+		return "claude"
+	}
+	return "openai"
+}
+
 // SanitizeCodexKeys removes Codex API key entries missing a BaseURL.
 // It trims whitespace and preserves order for remaining entries.
 func (cfg *Config) SanitizeCodexKeys() {
@@ -213,14 +428,19 @@ func sanitizeCodexKeyEntries(entries []CodexKey) []CodexKey {
 	return out
 }
 
-// SanitizeClaudeKeys normalizes headers for Claude credentials.
+// SanitizeClaudeKeys normalizes Claude credential groups and child entries.
 func (cfg *Config) SanitizeClaudeKeys() {
 	if cfg == nil || len(cfg.ClaudeKey) == 0 {
 		return
 	}
+	out := make([]ClaudeKey, 0, len(cfg.ClaudeKey))
 	for i := range cfg.ClaudeKey {
-		entry := &cfg.ClaudeKey[i]
+		entry := cfg.ClaudeKey[i]
+		entry.Name = strings.TrimSpace(entry.Name)
+		entry.APIKey = strings.TrimSpace(entry.APIKey)
 		entry.Prefix = normalizeModelPrefix(entry.Prefix)
+		entry.BaseURL = strings.TrimSpace(entry.BaseURL)
+		entry.ProxyURL = strings.TrimSpace(entry.ProxyURL)
 		entry.Headers = NormalizeHeaders(entry.Headers)
 		entry.ExcludedModels = NormalizeExcludedModels(entry.ExcludedModels)
 		// Only a recognized value is rewritten. An unrecognized one is preserved as
@@ -231,7 +451,41 @@ func (cfg *Config) SanitizeClaudeKeys() {
 		} else {
 			entry.FingerprintProfile = strings.TrimSpace(entry.FingerprintProfile)
 		}
+		entry.APIKeyEntries = sanitizeClaudeAPIKeyEntries(entry.APIKeyEntries)
+		if entry.Disabled {
+			continue
+		}
+		if entry.APIKey == "" && entry.BaseURL == "" && len(entry.APIKeyEntries) == 0 {
+			continue
+		}
+		out = append(out, entry)
 	}
+	cfg.ClaudeKey = out
+}
+
+func sanitizeClaudeAPIKeyEntries(entries []ClaudeAPIKeyEntry) []ClaudeAPIKeyEntry {
+	if len(entries) == 0 {
+		return entries
+	}
+	seen := make(map[string]struct{}, len(entries))
+	out := make([]ClaudeAPIKeyEntry, 0, len(entries))
+	for i := range entries {
+		entry := entries[i]
+		entry.Name = strings.TrimSpace(entry.Name)
+		entry.APIKey = strings.TrimSpace(entry.APIKey)
+		entry.BaseURL = strings.TrimSpace(entry.BaseURL)
+		entry.ProxyURL = strings.TrimSpace(entry.ProxyURL)
+		if entry.Disabled || (entry.APIKey == "" && entry.BaseURL == "") {
+			continue
+		}
+		uniqueKey := entry.APIKey + "|" + entry.BaseURL + "|" + entry.ProxyURL + "|" + entry.Name
+		if _, exists := seen[uniqueKey]; exists {
+			continue
+		}
+		seen[uniqueKey] = struct{}{}
+		out = append(out, entry)
+	}
+	return out
 }
 
 func sanitizeGeminiKeyEntries(entries []GeminiKey) []GeminiKey {

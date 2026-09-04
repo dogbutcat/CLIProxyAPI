@@ -13,7 +13,6 @@ import (
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
-	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -119,7 +118,7 @@ func (s *Service) syncPluginRuntimeConfigForConfig(ctx context.Context, cfg *con
 		s.accessManager.SetProviders(sdkaccess.RegisteredProviders())
 	}
 	s.pluginHost.RegisterUsagePlugins()
-	sdktranslator.SetPluginHooks(s.pluginHost)
+	setTranslationPluginHooks(s.pluginHost)
 	if s.server != nil {
 		s.server.RefreshPluginManagementRoutes()
 	}

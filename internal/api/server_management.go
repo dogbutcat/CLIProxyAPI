@@ -23,6 +23,9 @@ func (s *Server) registerManagementRoutes() {
 
 	s.engine.POST("/v0/management/oauth-callback", s.managementAvailabilityMiddleware(), s.mgmt.PostOAuthCallback)
 	s.engine.GET("/v0/management/oauth-callback", s.managementAvailabilityMiddleware(), s.mgmt.GetOAuthCallback)
+	s.engine.GET("/usage-service/info", s.managementAvailabilityMiddleware(), s.mgmt.GetUsageServiceInfo)
+	s.engine.GET("/usage-service/config", s.managementAvailabilityMiddleware(), s.mgmt.Middleware(), s.mgmt.GetUsageServiceConfig)
+	s.engine.GET("/status", s.managementAvailabilityMiddleware(), s.mgmt.Middleware(), s.mgmt.GetUsageStoreStatus)
 
 	mgmt := s.engine.Group("/v0/management")
 	mgmt.Use(s.managementAvailabilityMiddleware(), s.mgmt.Middleware())
@@ -82,6 +85,42 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.DELETE("/api-keys", s.mgmt.DeleteAPIKeys)
 		mgmt.GET("/api-key-usage", s.mgmt.GetAPIKeyUsage)
 		mgmt.GET("/usage-queue", s.mgmt.GetUsageQueue)
+		mgmt.GET("/usage/capabilities", s.mgmt.GetUsageCapabilities)
+		mgmt.GET("/dashboard/summary", s.mgmt.GetDashboardSummary)
+		mgmt.GET("/usage/dashboard/summary", s.mgmt.GetDashboardSummary)
+		mgmt.GET("/model-prices", s.mgmt.GetModelPrices)
+		mgmt.PUT("/model-prices", s.mgmt.PutModelPrices)
+		mgmt.DELETE("/model-prices/:model", s.mgmt.DeleteModelPrice)
+		mgmt.GET("/model-prices/usage-summary", s.mgmt.GetModelPriceUsageSummary)
+		mgmt.POST("/model-prices/sync", s.mgmt.PostModelPricesSync)
+		mgmt.GET("/api-key-aliases", s.mgmt.GetAPIKeyAliases)
+		mgmt.PUT("/api-key-aliases", s.mgmt.PutAPIKeyAliases)
+		mgmt.DELETE("/api-key-aliases/:api_key_hash", s.mgmt.DeleteAPIKeyAlias)
+		mgmt.GET("/account-action-candidates", s.mgmt.ListAccountActionCandidates)
+		mgmt.POST("/account-action-candidates/:id/ignore", s.mgmt.IgnoreAccountActionCandidate)
+		mgmt.POST("/account-action-candidates/:id/resolve", s.mgmt.ResolveAccountActionCandidate)
+		mgmt.POST("/account-action-candidates/:id/enable", s.mgmt.EnableAccountActionCandidate)
+		mgmt.DELETE("/account-action-candidates/:id/auth-file", s.mgmt.DeleteAccountActionCandidateAuthFile)
+		mgmt.GET("/usage/export", s.mgmt.ExportUsage)
+		mgmt.POST("/usage/import", s.mgmt.ImportUsage)
+		mgmt.POST("/usage/import-sessions", s.mgmt.CreateUsageImportSession)
+		mgmt.GET("/usage/import-sessions/:id", s.mgmt.GetUsageImportSession)
+		mgmt.PUT("/usage/import-sessions/:id/chunk", s.mgmt.UploadUsageImportSessionChunk)
+		mgmt.POST("/usage/import-sessions/:id/complete", s.mgmt.CompleteUsageImportSession)
+		mgmt.DELETE("/usage/import-sessions/:id", s.mgmt.CancelUsageImportSession)
+		mgmt.GET("/monitoring/accounts", s.mgmt.GetMonitoringAccounts)
+		mgmt.GET("/monitoring/keys", s.mgmt.GetMonitoringKeys)
+		mgmt.GET("/monitoring/realtime", s.mgmt.GetMonitoringRealtime)
+		mgmt.GET("/monitoring/selectors", s.mgmt.GetMonitoringSelectors)
+		mgmt.POST("/monitoring/analytics", s.mgmt.PostMonitoringAnalytics)
+		mgmt.GET("/monitoring/header-snapshots", s.mgmt.GetMonitoringHeaderSnapshots)
+		mgmt.GET("/usage/monitoring/accounts", s.mgmt.GetMonitoringAccounts)
+		mgmt.GET("/usage/monitoring/keys", s.mgmt.GetMonitoringKeys)
+		mgmt.GET("/usage/monitoring/realtime", s.mgmt.GetMonitoringRealtime)
+		mgmt.GET("/usage/monitoring/selectors", s.mgmt.GetMonitoringSelectors)
+		mgmt.POST("/usage/monitoring/analytics", s.mgmt.PostMonitoringAnalytics)
+		mgmt.GET("/usage/monitoring/header-snapshots", s.mgmt.GetMonitoringHeaderSnapshots)
+		mgmt.GET("/usage/status", s.mgmt.GetUsageStoreStatus)
 
 		mgmt.GET("/gemini-api-key", s.mgmt.GetGeminiKeys)
 		mgmt.PUT("/gemini-api-key", s.mgmt.PutGeminiKeys)
@@ -162,6 +201,16 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.PUT("/oauth-request-scoped-errors", s.mgmt.PutOAuthRequestScopedErrors)
 		mgmt.PATCH("/oauth-request-scoped-errors", s.mgmt.PatchOAuthRequestScopedErrors)
 		mgmt.DELETE("/oauth-request-scoped-errors", s.mgmt.DeleteOAuthRequestScopedErrors)
+
+		mgmt.GET("/opencode-go", s.mgmt.GetOpenCodeGo)
+		mgmt.PUT("/opencode-go", s.mgmt.PutOpenCodeGo)
+		mgmt.PATCH("/opencode-go", s.mgmt.PatchOpenCodeGo)
+		mgmt.DELETE("/opencode-go", s.mgmt.DeleteOpenCodeGo)
+		mgmt.GET("/opencode-go/quota", s.mgmt.GetOpenCodeGoQuota)
+		mgmt.POST("/opencode-go/quota/:entry/refresh", s.mgmt.PostOpenCodeGoQuotaRefresh)
+		mgmt.GET("/opencode-go/referral/:workspace", s.mgmt.GetOpenCodeGoReferralSummary)
+		mgmt.GET("/opencode-go/referral/:workspace/rewards/:reward/preview", s.mgmt.GetOpenCodeGoReferralRewardPreview)
+		mgmt.POST("/opencode-go/referral/:workspace/rewards/:reward/apply", s.mgmt.PostOpenCodeGoReferralRewardApply)
 
 		mgmt.GET("/auth-files", s.mgmt.ListAuthFiles)
 		mgmt.GET("/auth-files/models", s.mgmt.GetAuthFileModels)
@@ -249,7 +298,7 @@ func (s *Server) pluginManagementNoRoute(c *gin.Context) {
 		c.AbortWithStatus(http.StatusNotFound)
 		return
 	}
-	if s.pluginHost == nil || s.mgmt == nil {
+	if s.mgmt == nil {
 		c.AbortWithStatus(http.StatusNotFound)
 		return
 	}
@@ -260,8 +309,16 @@ func (s *Server) pluginManagementNoRoute(c *gin.Context) {
 	if c.IsAborted() {
 		return
 	}
+	if s.serveLegacyOpenCodeGoManagementRoute(c) {
+		c.Abort()
+		return
+	}
 	if s.mgmt.ServePluginAuthURL(c) {
 		c.Abort()
+		return
+	}
+	if s.pluginHost == nil {
+		c.AbortWithStatus(http.StatusNotFound)
 		return
 	}
 	if s.pluginHost.ServeManagementHTTP(c.Writer, c.Request) {
@@ -269,6 +326,50 @@ func (s *Server) pluginManagementNoRoute(c *gin.Context) {
 		return
 	}
 	c.AbortWithStatus(http.StatusNotFound)
+}
+
+func (s *Server) serveLegacyOpenCodeGoManagementRoute(c *gin.Context) bool {
+	if s == nil || s.mgmt == nil || c == nil || c.Request == nil || c.Request.URL == nil {
+		return false
+	}
+	path := strings.TrimPrefix(c.Request.URL.Path, "/v0/management/opencode-go/")
+	if path == c.Request.URL.Path || path == "" {
+		return false
+	}
+	parts := strings.Split(strings.Trim(path, "/"), "/")
+	if len(parts) == 2 && parts[1] == "quota" && c.Request.Method == http.MethodGet {
+		appendGinParam(c, "entry", parts[0])
+		s.mgmt.GetOpenCodeGoQuotaEntry(c)
+		return true
+	}
+	if len(parts) == 2 && parts[1] == "referral" && c.Request.Method == http.MethodGet {
+		appendGinParam(c, "workspace", parts[0])
+		s.mgmt.GetOpenCodeGoReferralSummary(c)
+		return true
+	}
+	if len(parts) == 5 && parts[1] == "referral" && parts[2] == "rewards" && parts[4] == "preview" && c.Request.Method == http.MethodGet {
+		appendGinParam(c, "workspace", parts[0])
+		appendGinParam(c, "reward", parts[3])
+		s.mgmt.GetOpenCodeGoReferralRewardPreview(c)
+		return true
+	}
+	if len(parts) == 5 && parts[1] == "referral" && parts[2] == "rewards" && parts[4] == "apply" && c.Request.Method == http.MethodPost {
+		appendGinParam(c, "workspace", parts[0])
+		appendGinParam(c, "reward", parts[3])
+		s.mgmt.PostOpenCodeGoReferralRewardApply(c)
+		return true
+	}
+	return false
+}
+
+func appendGinParam(c *gin.Context, key, value string) {
+	for i := range c.Params {
+		if c.Params[i].Key == key {
+			c.Params[i].Value = value
+			return
+		}
+	}
+	c.Params = append(c.Params, gin.Param{Key: key, Value: value})
 }
 
 func (s *Server) pluginResourceNoRoute(c *gin.Context) {

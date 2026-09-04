@@ -18,6 +18,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/pluginhost"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/pluginstore"
+	usagebridge "github.com/router-for-me/CLIProxyAPI/v7/internal/usage"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v7/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
@@ -38,28 +39,32 @@ const attemptMaxIdleTime = 2 * time.Hour
 
 // Handler aggregates config reference, persistence path and helpers.
 type Handler struct {
-	cfg                     *config.Config
-	configFilePath          string
-	mu                      sync.Mutex
-	reloadMu                sync.Mutex
-	reloadGeneration        uint64
-	appliedReloadGeneration uint64
-	attemptsMu              sync.Mutex
-	failedAttempts          map[string]*attemptInfo // keyed by client IP
-	authManager             *coreauth.Manager
-	tokenStore              coreauth.Store
-	localPassword           string
-	allowRemoteOverride     bool
-	envSecret               string
-	logDir                  string
-	postAuthHook            coreauth.PostAuthHook
-	postAuthPersistHook     coreauth.PostAuthHook
-	pluginHost              *pluginhost.Host
-	configReloadHook        func(context.Context, *config.Config)
-	pluginStoreRegistryURL  string
-	pluginStoreHTTPClient   pluginstore.HTTPDoer
-	pluginReleaseCacheMu    sync.Mutex
-	pluginReleaseCache      map[string]pluginReleaseCacheEntry
+	cfg                       *config.Config
+	configFilePath            string
+	mu                        sync.Mutex
+	reloadMu                  sync.Mutex
+	reloadGeneration          uint64
+	appliedReloadGeneration   uint64
+	attemptsMu                sync.Mutex
+	failedAttempts            map[string]*attemptInfo // keyed by client IP
+	authManager               *coreauth.Manager
+	tokenStore                coreauth.Store
+	localPassword             string
+	allowRemoteOverride       bool
+	envSecret                 string
+	logDir                    string
+	postAuthHook              coreauth.PostAuthHook
+	postAuthPersistHook       coreauth.PostAuthHook
+	pluginHost                *pluginhost.Host
+	configReloadHook          func(context.Context, *config.Config)
+	openCodeGoQuotaRuntime    OpenCodeGoQuotaRuntime
+	openCodeGoReferralRuntime OpenCodeGoReferralRuntime
+	pluginStoreRegistryURL    string
+	pluginStoreHTTPClient     pluginstore.HTTPDoer
+	pluginReleaseCacheMu      sync.Mutex
+	pluginReleaseCache        map[string]pluginReleaseCacheEntry
+	usageBridge               *usagebridge.Bridge
+	usageMetadataProvider     usagebridge.MonitoringAuthMetadataProvider
 }
 
 type configReloadSnapshot struct {
@@ -157,6 +162,26 @@ func (h *Handler) SetConfigReloadHook(hook func(context.Context, *config.Config)
 	}
 	h.mu.Lock()
 	h.configReloadHook = hook
+	h.mu.Unlock()
+}
+
+// SetOpenCodeGoQuotaRuntime updates the runtime callbacks used by OpenCode Go quota endpoints.
+func (h *Handler) SetOpenCodeGoQuotaRuntime(runtime OpenCodeGoQuotaRuntime) {
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
+	h.openCodeGoQuotaRuntime = runtime
+	h.mu.Unlock()
+}
+
+// SetOpenCodeGoReferralRuntime updates the runtime callbacks used by OpenCode Go referral endpoints.
+func (h *Handler) SetOpenCodeGoReferralRuntime(runtime OpenCodeGoReferralRuntime) {
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
+	h.openCodeGoReferralRuntime = runtime
 	h.mu.Unlock()
 }
 

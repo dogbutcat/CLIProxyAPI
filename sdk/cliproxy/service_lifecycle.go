@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/api"
@@ -14,9 +15,7 @@ import (
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v7/sdk/access"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v7/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
-	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -36,6 +35,7 @@ func (s *Service) Run(ctx context.Context) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	s.shutdownOnce = sync.Once{}
 	ctx, runCancel := context.WithCancel(ctx)
 	s.homeMu.Lock()
 	s.runCancel = runCancel
@@ -49,16 +49,18 @@ func (s *Service) Run(ctx context.Context) error {
 		s.homeMu.Unlock()
 	}()
 
-	usage.StartDefault(ctx)
+	if errStartUsage := s.startUsageRuntime(ctx); errStartUsage != nil {
+		return errStartUsage
+	}
 	homeEnabled := s.cfg != nil && s.cfg.Home.Enabled
 	if homeEnabled {
 		forceHomeRuntimeConfig(s.cfg)
 		redisqueue.SetUsageStatisticsEnabled(true)
 	}
 
-	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer shutdownCancel()
 	defer func() {
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer shutdownCancel()
 		if err := s.Shutdown(shutdownCtx); err != nil {
 			log.Errorf("service shutdown returned error: %v", err)
 		}
@@ -79,10 +81,8 @@ func (s *Service) Run(ctx context.Context) error {
 			log.Warnf("failed to load auth store: %v", errLoad)
 		}
 		s.registerConfigAPIKeyAuths(coreauth.WithSkipPersist(ctx), s.cfg)
-		if s.cfg.SaveCooldownStatus {
-			if errRestoreCooldown := s.coreManager.RestoreCooldownStates(ctx); errRestoreCooldown != nil {
-				log.Warnf("failed to restore cooldown state: %v", errRestoreCooldown)
-			}
+		if !s.restoreCooldownAndStartOpenCodeRuntime(ctx, s.cfg) {
+			return context.Canceled
 		}
 	}
 
@@ -116,7 +116,7 @@ func (s *Service) Run(ctx context.Context) error {
 	}
 
 	// handlers no longer depend on legacy clients; pass nil slice initially
-	s.server = api.NewServer(s.cfg, s.coreManager, s.accessManager, s.configPath, s.serverOptions...)
+	s.server = api.NewServer(s.cfg, s.coreManager, s.accessManager, s.configPath, s.serverOptionsWithRuntimeUsageBridge()...)
 	s.syncPluginRuntimeConfig(ctx)
 	if homeEnabled {
 		s.syncPluginModelRuntime(ctx)
@@ -215,6 +215,18 @@ func (s *Service) Run(ctx context.Context) error {
 	}
 }
 
+func (s *Service) restoreCooldownAndStartOpenCodeRuntime(ctx context.Context, cfg *config.Config) bool {
+	if s == nil || s.coreManager == nil {
+		return false
+	}
+	if cfg != nil && cfg.SaveCooldownStatus {
+		if errRestoreCooldown := s.coreManager.RestoreCooldownStates(ctx); errRestoreCooldown != nil {
+			log.Warnf("failed to restore cooldown state: %v", errRestoreCooldown)
+		}
+	}
+	return s.syncOpenCodeRuntimeConfig(ctx, cfg)
+}
+
 // Shutdown gracefully stops background workers and the HTTP server.
 // It ensures all resources are properly cleaned up and connections are closed.
 // The shutdown is idempotent and can be called multiple times safely.
@@ -307,6 +319,13 @@ func (s *Service) Shutdown(ctx context.Context) error {
 			s.authQueueStop = nil
 		}
 
+		if errStopOpenCode := s.stopOpenCodeRuntime(ctx); errStopOpenCode != nil {
+			log.Errorf("failed to stop OpenCode Go runtime: %v", errStopOpenCode)
+			if shutdownErr == nil {
+				shutdownErr = errStopOpenCode
+			}
+		}
+
 		if errShutdownPprof := s.shutdownPprof(ctx); errShutdownPprof != nil {
 			log.Errorf("failed to stop pprof server: %v", errShutdownPprof)
 			if shutdownErr == nil {
@@ -328,7 +347,7 @@ func (s *Service) Shutdown(ctx context.Context) error {
 		}
 
 		if s.pluginHost != nil {
-			sdktranslator.SetPluginHooks(nil)
+			setTranslationPluginHooks(nil)
 			sdkAuth.RegisterPluginAuthParser(nil)
 			if s.watcher != nil {
 				s.watcher.SetPluginAuthParser(nil)
@@ -345,7 +364,12 @@ func (s *Service) Shutdown(ctx context.Context) error {
 			}
 		}
 
-		usage.StopDefault()
+		if errStopUsage := s.stopUsageRuntime(ctx); errStopUsage != nil {
+			log.Errorf("failed to stop usage runtime: %v", errStopUsage)
+			if shutdownErr == nil {
+				shutdownErr = errStopUsage
+			}
+		}
 	})
 	return shutdownErr
 }

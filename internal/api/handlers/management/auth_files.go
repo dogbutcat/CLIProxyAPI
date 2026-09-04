@@ -354,11 +354,31 @@ func (h *Handler) buildAuthFileEntryLocked(auth *coreauth.Auth) gin.H {
 	if projectID := authProjectID(auth); projectID != "" {
 		entry["project_id"] = projectID
 	}
+	if strings.EqualFold(strings.TrimSpace(auth.Provider), "opencode-go") || strings.EqualFold(strings.TrimSpace(authAttribute(auth, "provider_key")), "opencode-go") {
+		if keyName := strings.TrimSpace(authAttribute(auth, "key_name")); keyName != "" {
+			entry["key_name"] = keyName
+			entry["account"] = keyName
+			entry["label"] = keyName
+		}
+		if protocol := strings.TrimSpace(authAttribute(auth, "protocol")); protocol != "" {
+			entry["protocol"] = protocol
+		}
+		if workspaceID := strings.TrimSpace(authAttribute(auth, "workspace_id")); workspaceID != "" {
+			entry["project_id"] = workspaceID
+		}
+		if generatedName := strings.TrimSpace(authAttribute(auth, "generated_name")); generatedName != "" {
+			entry["generated_name"] = generatedName
+		}
+		if entryName := strings.TrimSpace(auth.ID); entryName != "" {
+			entry["opencode_go_entry_name"] = entryName
+			entry["opencodeGoEntryName"] = entryName
+		}
+	}
 	if accountType, account := auth.AccountInfo(); accountType != "" || account != "" {
 		if accountType != "" {
 			entry["account_type"] = accountType
 		}
-		if account != "" {
+		if account != "" && !strings.EqualFold(strings.TrimSpace(auth.Provider), "opencode-go") {
 			entry["account"] = account
 		}
 	}
