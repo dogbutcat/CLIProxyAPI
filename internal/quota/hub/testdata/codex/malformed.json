@@ -1,0 +1,9 @@
+{
+  "rate_limit": {
+    "allowed": true,
+    "limit_reached": false,
+    "primary_window": {
+      "used_percent": "not-a-number"
+    }
+  }
+}

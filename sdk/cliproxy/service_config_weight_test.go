@@ -21,6 +21,32 @@ func TestWeightedRoundRobinRoutingSelector(t *testing.T) {
 	}
 }
 
+func TestSeqRandomRoutingSelector(t *testing.T) {
+	for _, strategy := range []string{"seq-random", "sequential-random", "seqrandom", "sr"} {
+		state := normalizedRoutingRuntimeState(&internalconfig.Config{
+			Routing: internalconfig.RoutingConfig{Strategy: strategy},
+		})
+		if state.strategy != "seq-random" {
+			t.Fatalf("strategy %q normalized to %q, want seq-random", strategy, state.strategy)
+		}
+		if _, ok := newRoutingSelector(state).(*coreauth.SeqRandomStartSelector); !ok {
+			t.Fatalf("selector type = %T, want *auth.SeqRandomStartSelector", newRoutingSelector(state))
+		}
+	}
+}
+
+func TestSeqRandomRoutingSelectorUsesCacheAwareWithAuthDir(t *testing.T) {
+	state := normalizedRoutingRuntimeState(&internalconfig.Config{
+		AuthDir: t.TempDir(),
+		Routing: internalconfig.RoutingConfig{
+			Strategy: "seq-random",
+		},
+	})
+	if _, ok := newRoutingSelector(state).(*coreauth.CacheAwareSelector); !ok {
+		t.Fatalf("selector type = %T, want *auth.CacheAwareSelector", newRoutingSelector(state))
+	}
+}
+
 func TestServiceRejectsInvalidCredentialWeightConfigCommit(t *testing.T) {
 	originalCfg := &internalconfig.Config{}
 	service := &Service{cfg: originalCfg}

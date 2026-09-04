@@ -44,7 +44,7 @@ func (m *Manager) hasPluginScheduler() bool {
 
 func isBuiltInSelector(selector Selector) bool {
 	switch selector.(type) {
-	case *RoundRobinSelector, *WeightedRoundRobinSelector, *FillFirstSelector:
+	case *RoundRobinSelector, *WeightedRoundRobinSelector, *FillFirstSelector, *SeqRandomStartSelector:
 		return true
 	default:
 		return false
@@ -386,6 +386,7 @@ func (m *Manager) SetSelector(selector Selector) {
 	if selector == nil {
 		selector = &RoundRobinSelector{}
 	}
+	bindQuotaScoreLookup(selector, m.QuotaScore)
 	m.selectorMu.Lock()
 	defer m.selectorMu.Unlock()
 
@@ -406,6 +407,17 @@ func (m *Manager) SetSelector(selector Selector) {
 	if m.scheduler != nil {
 		m.scheduler.setSelector(selector)
 		m.syncScheduler()
+	}
+}
+
+func bindQuotaScoreLookup(selector Selector, lookup func(authID string) (float64, bool)) {
+	switch typed := selector.(type) {
+	case *SeqRandomStartSelector:
+		typed.setQuotaScoreLookup(lookup)
+	case *CacheAwareSelector:
+		bindQuotaScoreLookup(typed.fallback, lookup)
+	case *SessionAffinitySelector:
+		bindQuotaScoreLookup(typed.fallback, lookup)
 	}
 }
 
@@ -465,7 +477,7 @@ func (m *Manager) availableAuthsForRouteModelWithPriorityMode(auths []*Auth, pro
 		checkModel := m.selectionModelForAuth(candidate, routeModel)
 		blocked, reason, next := isAuthBlockedForModel(candidate, checkModel, now)
 		if !blocked {
-			priority := authPriority(candidate)
+			priority := authPriorityForModel(candidate, routeModel)
 			availableByPriority[priority] = append(availableByPriority[priority], candidate)
 			continue
 		}
@@ -521,7 +533,7 @@ func (m *Manager) availableAuthsForSelector(selector Selector, auths []*Auth, pr
 		return nil, nil, err
 	}
 	selectorAuths = cloneAuthSlice(selectorAuths)
-	return highestPriorityAuths(selectorAuths), selectorAuths, nil
+	return highestPriorityAuths(selectorAuths, routeModel), selectorAuths, nil
 }
 
 func selectionArgForSelector(selector Selector, routeModel string) string {
@@ -685,7 +697,7 @@ func cloneAuthSlice(auths []*Auth) []*Auth {
 	return out
 }
 
-func schedulerAuthCandidates(auths []*Auth) []pluginapi.SchedulerAuthCandidate {
+func schedulerAuthCandidates(auths []*Auth, model string) []pluginapi.SchedulerAuthCandidate {
 	if len(auths) == 0 {
 		return nil
 	}
@@ -697,7 +709,7 @@ func schedulerAuthCandidates(auths []*Auth) []pluginapi.SchedulerAuthCandidate {
 		out = append(out, pluginapi.SchedulerAuthCandidate{
 			ID:         auth.ID,
 			Provider:   strings.ToLower(strings.TrimSpace(auth.Provider)),
-			Priority:   authPriority(auth),
+			Priority:   authPriorityForModel(auth, model),
 			Status:     string(auth.Status),
 			Attributes: schedulerSafeAttributes(auth.Attributes),
 		})
@@ -801,7 +813,7 @@ func (m *Manager) pickViaPluginScheduler(ctx context.Context, scheduler PluginSc
 		Model:      model,
 		Stream:     opts.Stream,
 		Options:    schedulerOptions(opts),
-		Candidates: schedulerAuthCandidates(candidates),
+		Candidates: schedulerAuthCandidates(candidates, model),
 	}
 	resp, handled, errPick := scheduler.PickAuth(ctx, req)
 	if errPick != nil {
@@ -1176,6 +1188,9 @@ func (m *Manager) shouldRetryAfterErrorWithAttempted(ctx context.Context, opts c
 		return 0, false
 	}
 	if isRequestInvalidError(err) || isRequestStopError(err) {
+		return 0, false
+	}
+	if isCandidateExhaustedUpstreamError(err) {
 		return 0, false
 	}
 	if m.HomeEnabled() {

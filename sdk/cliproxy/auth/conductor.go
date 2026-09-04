@@ -73,6 +73,17 @@ type Selector interface {
 	Pick(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) (*Auth, error)
 }
 
+// CacheAwareResponseCallback records a successful response for prefix-cache affinity.
+type CacheAwareResponseCallback func()
+
+// CacheAwareTruncationCallback records a successfully truncated request payload.
+type CacheAwareTruncationCallback func(payload []byte)
+
+const (
+	CacheAwareResponseCallbackMetadataKey   = "cache_aware_response_callback"
+	CacheAwareTruncationCallbackMetadataKey = "cache_aware_truncation_callback"
+)
+
 type PluginScheduler interface {
 	PickAuth(context.Context, pluginapi.SchedulerPickRequest) (pluginapi.SchedulerPickResponse, bool, error)
 }
@@ -141,6 +152,7 @@ type Manager struct {
 
 	// Retry controls request retry behavior.
 	requestRetry        atomic.Int32
+	transientRetryCount atomic.Int32
 	maxRetryCredentials atomic.Int32
 	maxRetryInterval    atomic.Int64
 
@@ -149,6 +161,16 @@ type Manager struct {
 
 	// apiKeyModelRouting atomically publishes per-auth aliases and configured capabilities.
 	apiKeyModelRouting atomic.Value
+
+	// quotaScores stores external quota health for quota-aware routing.
+	quotaScores map[string]float64
+	// quotaThresholdStates tracks provider-reported threshold state transitions.
+	quotaThresholdStates map[string]bool
+	// quotaRefreshCallback asks provider-owned runtimes to refresh external quota.
+	quotaRefreshCallback QuotaRefreshCallback
+	// quotaCommitStates keeps stable process-local commit state per auth ID.
+	// It is intentionally independent of mu so quota commits never invert manager locks.
+	quotaCommitStates sync.Map
 
 	// modelPoolOffsets tracks per-auth alias pool rotation state.
 	modelPoolOffsets map[string]int
@@ -194,6 +216,7 @@ func NewManager(store Store, selector Selector, hook Hook) *Manager {
 		modelPoolOffsets:      make(map[string]int),
 	}
 	// atomic.Value requires non-nil initial value.
+	bindQuotaScoreLookup(selector, manager.QuotaScore)
 	manager.runtimeConfig.Store(&internalconfig.Config{})
 	manager.apiKeyModelRouting.Store(&apiKeyModelRoutingSnapshot{config: &internalconfig.Config{}})
 	defaultInFlightConfig, errInFlightConfig := HomeInFlightPublisherConfigFromConfig(internalconfig.DefaultCredentialInFlightConfig())

@@ -1,0 +1,29 @@
+{
+  "usage": {
+    "limit": 100,
+    "used": 30,
+    "remaining": 70
+  },
+  "limits": [
+    {
+      "limit": 1,
+      "used": 1,
+      "remaining": 1,
+      "resetAt": "2099-01-01T00:00:00Z"
+    },
+    {
+      "detail": {
+        "limit": 100,
+        "used": 100,
+        "resetIn": 60
+      }
+    }
+  ],
+  "scoped": {
+    "usage": {
+      "limit": 1,
+      "used": 1,
+      "resetAt": "2099-01-01T00:00:00Z"
+    }
+  }
+}

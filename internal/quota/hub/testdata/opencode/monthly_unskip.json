@@ -1,0 +1,24 @@
+{
+  "entryName": "auth-monthly-unskip",
+  "quota": {
+    "rolling": {
+      "usagePercent": 40,
+      "percentRemaining": 60,
+      "resetInSec": 7200,
+      "resetTime": "2026-01-10T14:00:00Z"
+    },
+    "weekly": {
+      "usagePercent": 30,
+      "percentRemaining": 70,
+      "resetInSec": 14400,
+      "resetTime": "2026-01-10T16:00:00Z"
+    },
+    "monthly": {
+      "usagePercent": 88,
+      "percentRemaining": 12,
+      "resetInSec": 28800,
+      "resetTime": "2026-01-10T20:00:00Z"
+    }
+  },
+  "timestamp": "2026-01-10T12:00:00Z"
+}

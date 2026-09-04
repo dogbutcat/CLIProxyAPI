@@ -5,6 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"reflect"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -239,8 +242,9 @@ func TestSchedulerPick_WeightedRoundRobinResetsCreditsWhenWeightsChange(t *testi
 
 	authA.Attributes[AttributeWeight] = "1"
 	scheduler.upsertAuth(authA)
+	const picks = 20
 	counts := make(map[string]int)
-	for index := 0; index < 20; index++ {
+	for index := 0; index < picks; index++ {
 		got, errPick := scheduler.pickSingle(context.Background(), "gemini", "", cliproxyexecutor.Options{}, nil)
 		if errPick != nil {
 			t.Fatalf("pickSingle() after weight change #%d error = %v", index, errPick)
@@ -267,8 +271,9 @@ func TestSchedulerPick_WeightedWebsocketResetsCreditsWhenWeightsChange(t *testin
 
 	authA.Attributes[AttributeWeight] = "1"
 	scheduler.upsertAuth(authA)
+	const picks = 20
 	counts := make(map[string]int)
-	for index := 0; index < 20; index++ {
+	for index := 0; index < picks; index++ {
 		got, errPick := scheduler.pickSingle(ctx, "codex", "", cliproxyexecutor.Options{}, nil)
 		if errPick != nil {
 			t.Fatalf("websocket pickSingle() after weight change #%d error = %v", index, errPick)
@@ -354,6 +359,227 @@ func TestSchedulerPick_FillFirstSticksToFirstReady(t *testing.T) {
 		}
 		if got.ID != "a" {
 			t.Fatalf("pickSingle() #%d auth.ID = %q, want %q", index, got.ID, "a")
+		}
+	}
+}
+
+func TestSchedulerSeqRandom_SequentialContinuation(t *testing.T) {
+	scheduler := newSchedulerForTest(
+		&SeqRandomStartSelector{},
+		&Auth{ID: "auth-a", Provider: "gemini"},
+		&Auth{ID: "auth-b", Provider: "gemini"},
+		&Auth{ID: "auth-c", Provider: "gemini"},
+	)
+
+	first, errPick := scheduler.pickSingle(context.Background(), "gemini", "", cliproxyexecutor.Options{}, nil)
+	if errPick != nil {
+		t.Fatalf("pickSingle() first error = %v", errPick)
+	}
+	second, errPick := scheduler.pickSingle(context.Background(), "gemini", "", cliproxyexecutor.Options{}, nil)
+	if errPick != nil {
+		t.Fatalf("pickSingle() second error = %v", errPick)
+	}
+	if first == nil || second == nil {
+		t.Fatalf("pickSingle() returned nil auth")
+	}
+	wantNext := map[string]string{
+		"auth-a": "auth-b",
+		"auth-b": "auth-c",
+		"auth-c": "auth-a",
+	}
+	if second.ID != wantNext[first.ID] {
+		t.Fatalf("second auth.ID = %q after %q, want %q", second.ID, first.ID, wantNext[first.ID])
+	}
+}
+
+func TestSchedulerSeqRandom_RandomizesInitialStartWithoutQuotaScores(t *testing.T) {
+	const pools = 128
+	starts := make(map[string]int)
+	for index := 0; index < pools; index++ {
+		scheduler := newSchedulerForTest(
+			&SeqRandomStartSelector{},
+			&Auth{ID: "auth-a", Provider: "gemini"},
+			&Auth{ID: "auth-b", Provider: "gemini"},
+			&Auth{ID: "auth-c", Provider: "gemini"},
+		)
+		got, errPick := scheduler.pickSingle(context.Background(), "gemini", "", cliproxyexecutor.Options{}, nil)
+		if errPick != nil {
+			t.Fatalf("pickSingle() pool #%d error = %v", index, errPick)
+		}
+		if got == nil {
+			t.Fatalf("pickSingle() pool #%d auth = nil", index)
+		}
+		starts[got.ID]++
+	}
+
+	if len(starts) < 2 {
+		t.Fatalf("initial starts = %v, want random starts across more than one index", starts)
+	}
+}
+
+func TestSchedulerSeqRandom_WeightedInitialStart(t *testing.T) {
+	const picks = 1000
+	counts := make(map[string]int)
+	for index := 0; index < picks; index++ {
+		scheduler := newSchedulerForTest(
+			&SeqRandomStartSelector{},
+			&Auth{ID: "auth-low-a", Provider: "gemini"},
+			&Auth{ID: "auth-high", Provider: "gemini"},
+			&Auth{ID: "auth-low-b", Provider: "gemini"},
+		)
+		scheduler.setQuotaScore("auth-low-a", 1)
+		scheduler.setQuotaScore("auth-high", 100)
+		scheduler.setQuotaScore("auth-low-b", 1)
+
+		got, errPick := scheduler.pickSingle(context.Background(), "gemini", "", cliproxyexecutor.Options{}, nil)
+		if errPick != nil {
+			t.Fatalf("pickSingle() error = %v", errPick)
+		}
+		if got == nil {
+			t.Fatalf("pickSingle() auth = nil")
+		}
+		counts[got.ID]++
+	}
+
+	if counts["auth-high"] < 900 {
+		t.Fatalf("weighted initial picks for auth-high = %d/%d, want broad majority; counts=%v", counts["auth-high"], picks, counts)
+	}
+}
+
+func TestSchedulerSeqRandom_OpenCodeGoPrefersHigherQuotaScore(t *testing.T) {
+	const picks = 1000
+	counts := make(map[string]int)
+	for index := 0; index < picks; index++ {
+		scheduler := newSchedulerForTest(
+			&SeqRandomStartSelector{},
+			&Auth{ID: "opencode-low-a", Provider: "opencode-go"},
+			&Auth{ID: "opencode-high", Provider: "opencode-go"},
+			&Auth{ID: "opencode-low-b", Provider: "opencode-go"},
+		)
+		scheduler.setQuotaScore("opencode-low-a", 1)
+		scheduler.setQuotaScore("opencode-high", 100)
+		scheduler.setQuotaScore("opencode-low-b", 1)
+
+		got, errPick := scheduler.pickSingle(context.Background(), "opencode-go", "", cliproxyexecutor.Options{}, nil)
+		if errPick != nil {
+			t.Fatalf("pickSingle() error = %v", errPick)
+		}
+		if got == nil {
+			t.Fatalf("pickSingle() auth = nil")
+		}
+		counts[got.ID]++
+	}
+
+	if counts["opencode-high"] < 900 {
+		t.Fatalf("OpenCode Go quota-weighted initial picks = %d/%d, want broad majority; counts=%v", counts["opencode-high"], picks, counts)
+	}
+}
+
+func TestSchedulerSeqRandom_QuotaScoresOnlySeedInitialStart(t *testing.T) {
+	scheduler := newSchedulerForTest(
+		&SeqRandomStartSelector{},
+		&Auth{ID: "auth-a", Provider: "gemini"},
+		&Auth{ID: "auth-b", Provider: "gemini"},
+		&Auth{ID: "auth-c", Provider: "gemini"},
+	)
+	scheduler.setQuotaScore("auth-a", 0)
+	scheduler.setQuotaScore("auth-b", 1)
+	scheduler.setQuotaScore("auth-c", 0)
+
+	first, errPick := scheduler.pickSingle(context.Background(), "gemini", "", cliproxyexecutor.Options{}, nil)
+	if errPick != nil {
+		t.Fatalf("pickSingle() first error = %v", errPick)
+	}
+	if first == nil || first.ID != "auth-b" {
+		t.Fatalf("first auth = %#v, want quota-weighted seed auth-b", first)
+	}
+	scheduler.setQuotaScore("auth-b", 100)
+
+	second, errPick := scheduler.pickSingle(context.Background(), "gemini", "", cliproxyexecutor.Options{}, nil)
+	if errPick != nil {
+		t.Fatalf("pickSingle() second error = %v", errPick)
+	}
+	if second == nil || second.ID != "auth-c" {
+		t.Fatalf("second auth = %#v, want sequential auth-c", second)
+	}
+}
+
+func TestManagerSeqRandom_OpenCodeGoQuotaResultSkipsExhaustedAuths(t *testing.T) {
+	manager := NewManager(nil, &SeqRandomStartSelector{}, nil)
+	manager.executors["opencode-go"] = schedulerTestExecutor{provider: "opencode-go"}
+	model := "qwen3.7-max"
+	reg := registry.GetGlobalRegistry()
+	for _, authID := range []string{"opencode-zero-a", "opencode-high", "opencode-low", "opencode-zero-b", "opencode-unknown"} {
+		reg.RegisterClient(authID, "opencode-go", []*registry.ModelInfo{{ID: model}})
+		t.Cleanup(func() { reg.UnregisterClient(authID) })
+		if _, errRegister := manager.Register(context.Background(), &Auth{ID: authID, Provider: "opencode-go"}); errRegister != nil {
+			t.Fatalf("Register(%s) error = %v", authID, errRegister)
+		}
+	}
+	retryAfter := time.Hour
+	for _, authID := range []string{"opencode-zero-a", "opencode-zero-b"} {
+		manager.ApplyQuotaResult(context.Background(), QuotaResultUpdate{
+			AuthID:            authID,
+			Provider:          "opencode-go",
+			Score:             0,
+			ThresholdExceeded: true,
+			RetryAfter:        &retryAfter,
+		})
+	}
+	manager.ApplyQuotaResult(context.Background(), QuotaResultUpdate{
+		AuthID:            "opencode-high",
+		Provider:          "opencode-go",
+		Score:             45,
+		ThresholdExceeded: false,
+	})
+	manager.ApplyQuotaResult(context.Background(), QuotaResultUpdate{
+		AuthID:            "opencode-low",
+		Provider:          "opencode-go",
+		Score:             9,
+		ThresholdExceeded: false,
+	})
+
+	const picks = 99
+	counts := make(map[string]int)
+	for index := 0; index < picks; index++ {
+		got, errSelect := manager.SelectAuth(context.Background(), "opencode-go", model, cliproxyexecutor.Options{})
+		if errSelect != nil {
+			t.Fatalf("SelectAuth() #%d error = %v", index, errSelect)
+		}
+		if got == nil {
+			t.Fatalf("SelectAuth() #%d auth = nil", index)
+		}
+		counts[got.ID]++
+		if strings.Contains(got.ID, "zero") {
+			t.Fatalf("SelectAuth() selected exhausted auth %q; counts=%v", got.ID, counts)
+		}
+	}
+	for _, authID := range []string{"opencode-high", "opencode-low", "opencode-unknown"} {
+		if counts[authID] != picks/3 {
+			t.Fatalf("SelectAuth() counts = %v, want one seeded loop across all non-exhausted auths", counts)
+		}
+	}
+}
+
+func TestSchedulerSeqRandom_InitialCursorUsesEligiblePool(t *testing.T) {
+	t.Parallel()
+
+	view := readyView{flat: []*scheduledAuth{
+		{auth: &Auth{ID: "ordinary-heavy", Provider: "codex", Attributes: map[string]string{AttributeWeight: "100"}}},
+		{auth: &Auth{ID: "alpha-a", Provider: "codex", Attributes: map[string]string{AttributeCodexAlphaSearch: "true"}}},
+		{auth: &Auth{ID: "alpha-b", Provider: "codex", Attributes: map[string]string{AttributeCodexAlphaSearch: "true"}}},
+	}}
+	predicate := func(entry *scheduledAuth) bool {
+		return entry != nil && entry.auth != nil && entry.auth.Attributes[AttributeCodexAlphaSearch] == "true"
+	}
+
+	for index := 0; index < 200; index++ {
+		got := view.weightedInitialPick(predicate, nil)
+		if got == nil || got.auth == nil {
+			t.Fatalf("weightedInitialPick() = %#v, want eligible auth", got)
+		}
+		if got.auth.ID != "alpha-a" && got.auth.ID != "alpha-b" {
+			t.Fatalf("weightedInitialPick() = %q, want an eligible auth", got.auth.ID)
 		}
 	}
 }
@@ -1036,6 +1262,47 @@ func TestManagerCodexAlphaSearchPolicyFiltersBeforePluginScheduler(t *testing.T)
 	}
 }
 
+func TestManagerCodexAlphaSearchPolicyAllowsOAuthAndFlaggedAPIKeyOnly(t *testing.T) {
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
+	manager.executors["codex"] = schedulerTestExecutor{}
+	for _, candidate := range []*Auth{
+		{ID: "codex-oauth", Provider: "codex", Metadata: map[string]any{"access_token": "oauth-token"}},
+		{ID: "alpha-api-key", Provider: "codex", Attributes: map[string]string{AttributeAPIKey: "alpha", AttributeCodexAlphaSearch: "true"}},
+		{ID: "explicit-false-api-key", Provider: "codex", Attributes: map[string]string{AttributeAPIKey: "disabled", AttributeCodexAlphaSearch: "false"}},
+		{ID: "unflagged-api-key", Provider: "codex", Attributes: map[string]string{AttributeAPIKey: "ordinary"}},
+		{ID: "wrong-provider-api-key", Provider: "xai", Attributes: map[string]string{AttributeAPIKey: "xai", AttributeCodexAlphaSearch: "true"}},
+	} {
+		if _, errRegister := manager.Register(context.Background(), candidate); errRegister != nil {
+			t.Fatalf("Register(%s) error = %v", candidate.ID, errRegister)
+		}
+	}
+
+	scheduler := &fakePluginScheduler{handled: true}
+	scheduler.pick = func(_ context.Context, req pluginapi.SchedulerPickRequest) (pluginapi.SchedulerPickResponse, bool, error) {
+		got := make(map[string]bool, len(req.Candidates))
+		for _, candidate := range req.Candidates {
+			got[candidate.ID] = true
+		}
+		want := map[string]bool{"alpha-api-key": true, "codex-oauth": true}
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("scheduler candidates = %#v, want %#v", got, want)
+		}
+		return pluginapi.SchedulerPickResponse{Handled: true, AuthID: "codex-oauth"}, true, nil
+	}
+	manager.SetPluginScheduler(scheduler)
+
+	selected, errSelect := manager.SelectAuthWithCredentialPolicy(context.Background(), "codex", "", CredentialPolicyCodexAlphaSearchV1, cliproxyexecutor.Options{})
+	if errSelect != nil {
+		t.Fatalf("SelectAuthWithCredentialPolicy() error = %v", errSelect)
+	}
+	if selected == nil || selected.ID != "codex-oauth" {
+		t.Fatalf("SelectAuthWithCredentialPolicy() auth = %#v, want codex-oauth", selected)
+	}
+	if scheduler.calls != 1 {
+		t.Fatalf("scheduler.calls = %d, want 1", scheduler.calls)
+	}
+}
+
 func TestManagerCodexAlphaSearchPolicyRejectsOrdinaryAPIKey(t *testing.T) {
 	manager := NewManager(nil, &RoundRobinSelector{}, nil)
 	manager.executors["codex"] = schedulerTestExecutor{}
@@ -1054,6 +1321,93 @@ func TestManagerCodexAlphaSearchPolicyRejectsOrdinaryAPIKey(t *testing.T) {
 	var authErr *Error
 	if !errors.As(errSelect, &authErr) || authErr.Code != "auth_not_found" {
 		t.Fatalf("SelectAuthWithCredentialPolicy() error = %#v, want auth_not_found", errSelect)
+	}
+}
+
+func TestManagerCodexAlphaSearchPolicyRejectsExplicitFalseAndWrongProvider(t *testing.T) {
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
+	manager.executors["codex"] = schedulerTestExecutor{}
+	for _, candidate := range []*Auth{
+		{ID: "explicit-false-api-key", Provider: "codex", Attributes: map[string]string{AttributeAPIKey: "disabled", AttributeCodexAlphaSearch: "false"}},
+		{ID: "wrong-provider-api-key", Provider: "xai", Attributes: map[string]string{AttributeAPIKey: "xai", AttributeCodexAlphaSearch: "true"}},
+	} {
+		if _, errRegister := manager.Register(context.Background(), candidate); errRegister != nil {
+			t.Fatalf("Register(%s) error = %v", candidate.ID, errRegister)
+		}
+	}
+
+	scheduler := &fakePluginScheduler{handled: true}
+	manager.SetPluginScheduler(scheduler)
+	selected, errSelect := manager.SelectAuthWithCredentialPolicy(context.Background(), "codex", "", CredentialPolicyCodexAlphaSearchV1, cliproxyexecutor.Options{})
+	if selected != nil {
+		t.Fatalf("SelectAuthWithCredentialPolicy() auth = %#v, want nil", selected)
+	}
+	var authErr *Error
+	if !errors.As(errSelect, &authErr) || authErr.Code != "auth_not_found" {
+		t.Fatalf("SelectAuthWithCredentialPolicy() error = %#v, want auth_not_found", errSelect)
+	}
+	if scheduler.calls != 0 {
+		t.Fatalf("scheduler.calls = %d, want 0", scheduler.calls)
+	}
+}
+
+func TestSchedulerCodexAlphaSearchPolicyWeightedRoundRobinIgnoresIneligibleWeights(t *testing.T) {
+	scheduler := newSchedulerForTest(
+		&WeightedRoundRobinSelector{},
+		&Auth{ID: "ordinary-heavy", Provider: "codex", Attributes: map[string]string{AttributeAPIKey: "ordinary", AttributeWeight: "100"}},
+		&Auth{ID: "alpha-heavy", Provider: "codex", Attributes: map[string]string{AttributeAPIKey: "alpha-heavy", AttributeCodexAlphaSearch: "true", AttributeWeight: "5"}},
+		&Auth{ID: "codex-oauth", Provider: "codex", Attributes: map[string]string{AttributeWeight: "1"}, Metadata: map[string]any{"access_token": "oauth-token"}},
+		&Auth{ID: "wrong-provider", Provider: "xai", Attributes: map[string]string{AttributeAPIKey: "xai", AttributeCodexAlphaSearch: "true", AttributeWeight: "100"}},
+	)
+	ctx := withCredentialPolicy(context.Background(), CredentialPolicyCodexAlphaSearchV1)
+
+	counts := make(map[string]int)
+	for index := 0; index < 600; index++ {
+		got, errPick := scheduler.pickSingle(ctx, "codex", "", cliproxyexecutor.Options{}, nil)
+		if errPick != nil {
+			t.Fatalf("pickSingle() #%d error = %v", index, errPick)
+		}
+		counts[got.ID]++
+	}
+	if counts["alpha-heavy"] != 500 || counts["codex-oauth"] != 100 {
+		t.Fatalf("eligible weighted picks = %#v, want alpha-heavy=500 codex-oauth=100", counts)
+	}
+	if counts["ordinary-heavy"] != 0 || counts["wrong-provider"] != 0 {
+		t.Fatalf("ineligible weighted picks = %#v, want zero ordinary-heavy/wrong-provider", counts)
+	}
+}
+
+func TestSchedulerCodexAlphaSearchPolicySeqRandomSkipsIneligibleWithoutLosingContinuation(t *testing.T) {
+	scheduler := newSchedulerForTest(
+		&SeqRandomStartSelector{},
+		&Auth{ID: "aaa-ordinary", Provider: "codex", Attributes: map[string]string{AttributeAPIKey: "ordinary"}},
+		&Auth{ID: "alpha-a", Provider: "codex", Attributes: map[string]string{AttributeAPIKey: "alpha-a", AttributeCodexAlphaSearch: "true"}},
+		&Auth{ID: "alpha-b", Provider: "codex", Attributes: map[string]string{AttributeAPIKey: "alpha-b", AttributeCodexAlphaSearch: "true"}},
+		&Auth{ID: "codex-oauth", Provider: "codex", Metadata: map[string]any{"access_token": "oauth-token"}},
+	)
+	ctx := withCredentialPolicy(context.Background(), CredentialPolicyCodexAlphaSearchV1)
+
+	first, errPick := scheduler.pickSingle(ctx, "codex", "", cliproxyexecutor.Options{}, nil)
+	if errPick != nil {
+		t.Fatalf("pickSingle() first error = %v", errPick)
+	}
+	second, errPick := scheduler.pickSingle(ctx, "codex", "", cliproxyexecutor.Options{}, nil)
+	if errPick != nil {
+		t.Fatalf("pickSingle() second error = %v", errPick)
+	}
+	if first == nil || second == nil {
+		t.Fatal("pickSingle() returned nil auth")
+	}
+	wantNext := map[string]string{
+		"alpha-a":     "alpha-b",
+		"alpha-b":     "codex-oauth",
+		"codex-oauth": "alpha-a",
+	}
+	if second.ID != wantNext[first.ID] {
+		t.Fatalf("second auth.ID = %q after %q, want %q", second.ID, first.ID, wantNext[first.ID])
+	}
+	if first.ID == "aaa-ordinary" || second.ID == "aaa-ordinary" {
+		t.Fatalf("seq-random selected ineligible auths: first=%q second=%q", first.ID, second.ID)
 	}
 }
 
@@ -1320,6 +1674,39 @@ func TestSelectHomeAuthWithCredentialPolicyTransportsAndValidatesPolicy(t *testi
 		t.Fatalf("Home credential policies = %v", got)
 	}
 	selection.End("test_complete")
+	if errDrain := registry.Drain(context.Background()); errDrain != nil {
+		t.Fatalf("Drain() error = %v", errDrain)
+	}
+}
+
+func TestSelectHomeAuthWithCredentialPolicyEndsRepeatedIneligibleBeforeStopping(t *testing.T) {
+	dispatcher := &authKindHomeDispatcher{auths: []Auth{
+		{ID: "ordinary-api-key", Provider: "codex", Attributes: map[string]string{AttributeAPIKey: "ordinary", "base_url": "https://ordinary.example.com"}},
+		{ID: "ordinary-api-key", Provider: "codex", Attributes: map[string]string{AttributeAPIKey: "ordinary", "base_url": "https://ordinary.example.com"}},
+	}}
+	manager := NewManager(nil, nil, nil)
+	manager.SetConfig(&internalconfig.Config{Home: internalconfig.HomeConfig{Enabled: true}})
+	registry := executionregistry.New()
+	manager.PublishHomeDispatch(dispatcher, registry, 1)
+	manager.RegisterExecutor(schedulerTestExecutor{provider: "codex"})
+
+	selection, errSelect := manager.SelectHomeAuthWithCredentialPolicy(context.Background(), "codex", "gpt-5.4", CredentialPolicyCodexAlphaSearchV1, cliproxyexecutor.Options{})
+	if selection != nil {
+		t.Fatalf("SelectHomeAuthWithCredentialPolicy() = %#v, want nil", selection)
+	}
+	var authErr *Error
+	if !errors.As(errSelect, &authErr) || authErr.Code != "auth_not_found" {
+		t.Fatalf("SelectHomeAuthWithCredentialPolicy() error = %#v, want auth_not_found", errSelect)
+	}
+	if got := dispatcher.counts; len(got) != 2 || got[0] != 1 || got[1] != 2 {
+		t.Fatalf("Home auth counts = %v, want [1 2]", got)
+	}
+	if got := dispatcher.policies; len(got) != 2 || got[0] != CredentialPolicyCodexAlphaSearchV1 || got[1] != CredentialPolicyCodexAlphaSearchV1 {
+		t.Fatalf("Home credential policies = %v", got)
+	}
+	if freeze := registry.FreezeInFlight(time.Now()); len(freeze.Executions) != 0 {
+		t.Fatalf("active Home executions = %#v, want none", freeze.Executions)
+	}
 	if errDrain := registry.Drain(context.Background()); errDrain != nil {
 		t.Fatalf("Drain() error = %v", errDrain)
 	}
@@ -1858,6 +2245,69 @@ func TestManager_InitializesSchedulerForBuiltInSelector(t *testing.T) {
 	manager.SetSelector(&FillFirstSelector{})
 	if manager.scheduler.strategy != schedulerStrategyFillFirst {
 		t.Fatalf("manager.scheduler.strategy = %v, want %v", manager.scheduler.strategy, schedulerStrategyFillFirst)
+	}
+
+	manager.SetSelector(&SeqRandomStartSelector{})
+	if manager.scheduler.strategy != schedulerStrategySeqRandom {
+		t.Fatalf("manager.scheduler.strategy = %v, want %v", manager.scheduler.strategy, schedulerStrategySeqRandom)
+	}
+}
+
+func TestManagerSetSelectorConcurrentSeqRandomSelectionRaceFree(t *testing.T) {
+	ctx := context.Background()
+	selector := &SeqRandomStartSelector{maxKeys: 1}
+	manager := NewManager(nil, selector, nil)
+	manager.RegisterExecutor(schedulerTestExecutor{provider: "gemini"})
+	manager.RegisterExecutor(schedulerTestExecutor{provider: "claude"})
+	for _, auth := range []*Auth{
+		{ID: "gemini-a", Provider: "gemini", Status: StatusActive},
+		{ID: "gemini-b", Provider: "gemini", Status: StatusActive},
+		{ID: "claude-a", Provider: "claude", Status: StatusActive},
+		{ID: "claude-b", Provider: "claude", Status: StatusActive},
+	} {
+		if _, errRegister := manager.Register(ctx, auth); errRegister != nil {
+			t.Fatalf("Register(%s) error = %v", auth.ID, errRegister)
+		}
+		manager.SetQuotaScore(auth.ID, 50)
+	}
+
+	providers := []string{"gemini", "claude"}
+	errCh := make(chan error, 1)
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		for index := 0; index < 500; index++ {
+			manager.SetSelector(selector)
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for index := 0; index < 500; index++ {
+			provider := providers[index%len(providers)]
+			got, errPick := manager.SelectAuth(ctx, provider, "", cliproxyexecutor.Options{})
+			if errPick != nil {
+				select {
+				case errCh <- errPick:
+				default:
+				}
+				return
+			}
+			if got == nil {
+				select {
+				case errCh <- &Error{Code: "nil_auth", Message: "nil auth"}:
+				default:
+				}
+				return
+			}
+		}
+	}()
+	wg.Wait()
+
+	select {
+	case errPick := <-errCh:
+		t.Fatalf("concurrent selection error = %v", errPick)
+	default:
 	}
 }
 

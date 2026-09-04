@@ -473,7 +473,7 @@ func collectAvailableByPriority(auths []*Auth, model string, now time.Time) (ava
 		candidate := auths[i]
 		blocked, reason, next := isAuthBlockedForModel(candidate, model, now)
 		if !blocked {
-			priority := authPriority(candidate)
+			priority := authPriorityForModel(candidate, model)
 			available[priority] = append(available[priority], candidate)
 			continue
 		}
@@ -557,14 +557,14 @@ func availableAuthsFromPriorityBuckets(availableByPriority map[int][]*Auth, allP
 // highestPriorityAuths narrows an availability slice to its highest priority tier while
 // preserving the input order. The input slice is returned unchanged when every candidate
 // already shares the highest priority, so the common single-tier case allocates nothing.
-func highestPriorityAuths(auths []*Auth) []*Auth {
+func highestPriorityAuths(auths []*Auth, model string) []*Auth {
 	if len(auths) <= 1 {
 		return auths
 	}
 	bestPriority := 0
 	bestCount := 0
 	for _, auth := range auths {
-		priority := authPriority(auth)
+		priority := authPriorityForModel(auth, model)
 		switch {
 		case bestCount == 0 || priority > bestPriority:
 			bestPriority = priority
@@ -578,7 +578,7 @@ func highestPriorityAuths(auths []*Auth) []*Auth {
 	}
 	highest := make([]*Auth, 0, bestCount)
 	for _, auth := range auths {
-		if authPriority(auth) == bestPriority {
+		if authPriorityForModel(auth, model) == bestPriority {
 			highest = append(highest, auth)
 		}
 	}
@@ -808,6 +808,9 @@ func isAuthBlockedForModel(auth *Auth, model string, now time.Time) (bool, block
 	if auth.Quota.Exceeded && auth.Quota.Reason == "credential_quota" && auth.Quota.NextRecoverAt.After(now) {
 		return true, blockReasonCooldown, auth.Quota.NextRecoverAt
 	}
+	if auth.Quota.Reason == quotaObservationErrorCode {
+		return availabilityBlock(auth.Unavailable, auth.Quota.Exceeded, auth.NextRetryAfter, auth.Quota.NextRecoverAt, now)
+	}
 	if model != "" {
 		if len(auth.ModelStates) > 0 {
 			modelKey := canonicalModelKey(model)
@@ -997,7 +1000,7 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 	if err != nil {
 		return nil, err
 	}
-	fallbackAuths := highestPriorityAuths(available)
+	fallbackAuths := highestPriorityAuths(available, model)
 
 	modelKey := canonicalModelKey(model)
 	cacheKey := provider + "::" + primaryID + "::" + modelKey
@@ -1137,7 +1140,7 @@ func (s *SessionAffinitySelector) pickLCP(ctx context.Context, provider, model s
 		}
 	}
 
-	fallbackAuths := highestPriorityAuths(available)
+	fallbackAuths := highestPriorityAuths(available, model)
 	auth, errPick := s.fallback.Pick(ctx, provider, model, opts, fallbackAuths)
 	if errPick != nil {
 		return nil, true, errPick

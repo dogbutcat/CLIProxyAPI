@@ -39,6 +39,11 @@ func validateCredentialWeightYAML(data []byte) error {
 			if errValidate := validateWeightSequenceNode(value, name); errValidate != nil {
 				return errValidate
 			}
+			if name == "claude-api-key" {
+				if errValidate := validateClaudeAPIKeyEntryWeightNodes(value); errValidate != nil {
+					return errValidate
+				}
+			}
 			continue
 		}
 		if name == "openai-compatibility" {
@@ -106,6 +111,27 @@ func validateOpenAICompatibilityWeightNodes(sequence *yaml.Node) error {
 	return nil
 }
 
+func validateClaudeAPIKeyEntryWeightNodes(sequence *yaml.Node) error {
+	if sequence == nil || sequence.Kind != yaml.SequenceNode {
+		return nil
+	}
+	for keyIndex, keyEntry := range sequence.Content {
+		if keyEntry == nil || keyEntry.Kind != yaml.MappingNode {
+			continue
+		}
+		for index := 0; index+1 < len(keyEntry.Content); index += 2 {
+			if keyEntry.Content[index].Value != "api-key-entries" {
+				continue
+			}
+			path := fmt.Sprintf("claude-api-key[%d].api-key-entries", keyIndex)
+			if errValidate := validateWeightSequenceNode(keyEntry.Content[index+1], path); errValidate != nil {
+				return errValidate
+			}
+		}
+	}
+	return nil
+}
+
 // ValidateCredentialWeights validates weights for every API-key family.
 func (cfg *Config) ValidateCredentialWeights() error {
 	if cfg == nil {
@@ -124,6 +150,12 @@ func (cfg *Config) ValidateCredentialWeights() error {
 	for index := range cfg.ClaudeKey {
 		if errValidate := ValidateCredentialWeight(cfg.ClaudeKey[index].Weight); errValidate != nil {
 			return fmt.Errorf("claude-api-key[%d].weight: %w", index, errValidate)
+		}
+		for keyIndex := range cfg.ClaudeKey[index].APIKeyEntries {
+			weight := cfg.ClaudeKey[index].APIKeyEntries[keyIndex].Weight
+			if errValidate := ValidateCredentialWeight(weight); errValidate != nil {
+				return fmt.Errorf("claude-api-key[%d].api-key-entries[%d].weight: %w", index, keyIndex, errValidate)
+			}
 		}
 	}
 	for index := range cfg.VertexCompatAPIKey {

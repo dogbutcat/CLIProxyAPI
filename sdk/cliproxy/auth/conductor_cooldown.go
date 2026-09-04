@@ -186,16 +186,25 @@ func (m *Manager) ApplyConfigWithCooldownStateStore(ctx context.Context, cfg *in
 	m.mu.RLock()
 	oldStore := m.cooldownStore
 	m.mu.RUnlock()
+	previousCfg, _ := m.runtimeConfig.Load().(*internalconfig.Config)
+	if previousCfg != nil {
+		previousCfg = previousCfg.CloneForRuntime()
+	}
 	m.setConfigSnapshotLocked(cfg)
 	if oldStore != nil && !m.persistCooldownStatesToLocked(ctx, oldStore) {
+		m.setConfigSnapshotLocked(previousCfg)
 		return false
 	}
 	if errContext := ctx.Err(); errContext != nil {
+		m.setConfigSnapshotLocked(previousCfg)
 		return false
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.cooldownStore != oldStore {
+		m.mu.Unlock()
+		m.setConfigSnapshotLocked(previousCfg)
+		m.mu.Lock()
 		return false
 	}
 	if m.pendingCooldownStateStore == oldStore {
@@ -344,7 +353,11 @@ func (m *Manager) RestoreCooldownStates(ctx context.Context) error {
 
 func (m *Manager) restoreCooldownRecordLocked(record CooldownStateRecord, now time.Time) bool {
 	authID := strings.TrimSpace(record.AuthID)
-	if authID == "" || record.NextRetryAfter.IsZero() || !record.NextRetryAfter.After(now) {
+	activeUntil := record.NextRetryAfter
+	if record.Quota.Reason == quotaObservationErrorCode && record.Quota.Exceeded && record.Quota.NextRecoverAt.After(activeUntil) {
+		activeUntil = record.Quota.NextRecoverAt
+	}
+	if authID == "" || activeUntil.IsZero() || !activeUntil.After(now) {
 		return false
 	}
 	auth := m.auths[authID]
@@ -364,6 +377,9 @@ func (m *Manager) restoreCooldownRecordLocked(record CooldownStateRecord, now ti
 
 	if model == "" {
 		auth.Unavailable = true
+		if quota.Reason == quotaObservationErrorCode {
+			auth.Unavailable = record.NextRetryAfter.After(now)
+		}
 		auth.Status = StatusError
 		auth.NextRetryAfter = record.NextRetryAfter
 		applyCooldownFields(&auth.Quota, quota)
@@ -374,6 +390,9 @@ func (m *Manager) restoreCooldownRecordLocked(record CooldownStateRecord, now ti
 			auth.StatusMessage = reason
 		}
 		auth.LastError = cloneError(record.LastError)
+		if quota.Reason == quotaObservationErrorCode && auth.LastError != nil && auth.LastError.Code != quotaObservationErrorCode {
+			auth.StatusMessage = quotaObservationUnrelatedStatusMessage(auth.LastError)
+		}
 		return true
 	}
 
@@ -391,6 +410,25 @@ func (m *Manager) restoreCooldownRecordLocked(record CooldownStateRecord, now ti
 	auth.UpdatedAt = updatedAt
 	updateAggregatedAvailability(auth, now)
 	return true
+}
+
+func quotaObservationUnrelatedStatusMessage(lastErr *Error) string {
+	if lastErr == nil {
+		return ""
+	}
+	if isCloudflareChallengeResultError(lastErr) {
+		return "cloudflare challenge"
+	}
+	switch statusCodeFromResult(lastErr) {
+	case http.StatusUnauthorized:
+		return "unauthorized"
+	case http.StatusPaymentRequired, http.StatusForbidden:
+		return "payment_required"
+	case http.StatusNotFound:
+		return "not_found"
+	default:
+		return lastErr.Message
+	}
 }
 
 func clearCooldownStateForAuth(auth *Auth, now time.Time) bool {
@@ -677,7 +715,8 @@ func cooldownErrorEqual(a, b *Error) bool {
 }
 
 func authCooldownStateRecord(auth *Auth, now time.Time) (CooldownStateRecord, bool) {
-	if auth == nil || !auth.Unavailable || auth.NextRetryAfter.IsZero() || !auth.NextRetryAfter.After(now) {
+	hubQuotaActive := auth != nil && auth.Quota.Reason == quotaObservationErrorCode && auth.Quota.Exceeded && auth.Quota.NextRecoverAt.After(now)
+	if !hubQuotaActive && (auth == nil || !auth.Unavailable || auth.NextRetryAfter.IsZero() || !auth.NextRetryAfter.After(now)) {
 		return CooldownStateRecord{}, false
 	}
 	return CooldownStateRecord{
@@ -736,11 +775,13 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 		return
 	}
 	modelKey := canonicalModelKey(result.Model)
+	commitState := m.quotaCommitState(result.AuthID)
 
 	var authSnapshot *Auth
 	cooldownStateChanged := false
 	now := time.Now()
 
+	commitState.commitMu.Lock()
 	m.mu.Lock()
 	if auth, ok := m.auths[result.AuthID]; ok && auth != nil {
 		if modelKey == "" && strings.TrimSpace(result.RouteModel) != "" {
@@ -754,6 +795,9 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 		now = time.Now()
 		responseHeaders := internallogging.GetResponseHeaders(ctx)
 		modelState := existingModelState(auth, modelKey)
+		if isRuntimeQuotaResult(result) || (result.Success && successClearsQuotaState(auth, modelKey)) {
+			advanceQuotaRevisionLocked(commitState)
+		}
 		var cooldownRecordsBefore []CooldownStateRecord
 		trackCooldownState := m.cooldownStore != nil
 		if trackCooldownState {
@@ -785,6 +829,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 		} else {
 			if modelKey != "" {
 				if !shouldSkipCredentialCooldown(result.Error) {
+					authWideQuotaObservation, preserveAuthWideQuotaObservation := activeAuthWideQuotaObservation(auth, now)
 					disableCooling := m.cooldownDisabledForAuth(auth)
 					if result.Error != nil && result.Error.Code == ErrorCodeForceCooldown {
 						disableCooling = false
@@ -911,13 +956,20 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 					}
 					auth.Status = StatusError
 					updateAggregatedAvailability(auth, now)
+					if preserveAuthWideQuotaObservation {
+						restoreAuthWideQuotaObservation(auth, authWideQuotaObservation)
+					}
 				}
 			} else {
+				authWideQuotaObservation, preserveAuthWideQuotaObservation := activeAuthWideQuotaObservation(auth, now)
 				disableCooling := m.cooldownDisabledForAuth(auth)
 				if result.Error != nil && result.Error.Code == ErrorCodeForceCooldown {
 					disableCooling = false
 				}
 				applyAuthFailureState(auth, result.Error, result.RetryAfter, now, disableCooling)
+				if preserveAuthWideQuotaObservation && !isRuntimeQuotaResult(result) {
+					restoreAuthWideQuotaObservationAfterAuthFailure(auth, authWideQuotaObservation, result.Error)
+				}
 			}
 		}
 
@@ -931,7 +983,6 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 			}
 		}
 
-		_ = m.persist(ctx, auth)
 		authSnapshot = auth.Clone()
 		if trackCooldownState {
 			cooldownRecordsAfter := m.cooldownStateRecordsForAuthLocked(auth, now)
@@ -941,9 +992,6 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 	m.mu.Unlock()
 	if m.scheduler != nil && authSnapshot != nil {
 		m.scheduler.upsertAuth(authSnapshot)
-	}
-	if authSnapshot != nil && cooldownStateChanged {
-		m.persistCooldownStates(context.Background())
 	}
 
 	supportedModels, regEpoch := registry.GetGlobalRegistry().GetModelsAndEpochForClient(result.AuthID)
@@ -958,10 +1006,19 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 	if authSnapshot != nil && len(projections) > 0 {
 		reg.ApplyClientModelProjections(result.AuthID, regEpoch, authSnapshot.Generation, projections)
 	}
+	commitState.commitMu.Unlock()
+
+	if authSnapshot != nil {
+		_ = m.persist(ctx, authSnapshot)
+	}
+	if authSnapshot != nil && cooldownStateChanged {
+		m.persistCooldownStates(context.Background())
+	}
 
 	m.hook.OnResult(ctx, result)
 	m.publishErrorEvent(result, authSnapshot)
 	m.updateSessionAffinity(result)
+	m.triggerQuotaRefresh(ctx, result)
 }
 
 func (m *Manager) updateSessionAffinity(result Result) {
@@ -973,6 +1030,102 @@ func (m *Manager) updateSessionAffinity(result Result) {
 		OnResult(Result)
 	}); ok && affinity != nil {
 		affinity.OnResult(result)
+	}
+}
+
+type authWideQuotaObservationOverlay struct {
+	quota          QuotaState
+	lastError      *Error
+	status         Status
+	statusMessage  string
+	unavailable    bool
+	nextRetryAfter time.Time
+}
+
+func activeAuthWideQuotaObservation(auth *Auth, now time.Time) (authWideQuotaObservationOverlay, bool) {
+	if auth == nil || auth.Quota.Reason != quotaObservationErrorCode || !auth.Quota.Exceeded ||
+		auth.Quota.NextRecoverAt.IsZero() || !auth.Quota.NextRecoverAt.After(now) {
+		return authWideQuotaObservationOverlay{}, false
+	}
+	return authWideQuotaObservationOverlay{
+		quota:          auth.Quota,
+		lastError:      cloneError(auth.LastError),
+		status:         auth.Status,
+		statusMessage:  auth.StatusMessage,
+		unavailable:    auth.Unavailable,
+		nextRetryAfter: auth.NextRetryAfter,
+	}, true
+}
+
+func restoreAuthWideQuotaObservation(auth *Auth, overlay authWideQuotaObservationOverlay) {
+	if auth == nil {
+		return
+	}
+	auth.Quota = overlay.quota
+	auth.LastError = cloneError(overlay.lastError)
+	auth.Status = overlay.status
+	auth.StatusMessage = overlay.statusMessage
+	auth.Unavailable = overlay.unavailable
+	auth.NextRetryAfter = overlay.nextRetryAfter
+}
+
+func restoreAuthWideQuotaObservationAfterAuthFailure(auth *Auth, overlay authWideQuotaObservationOverlay, resultErr *Error) {
+	if auth == nil {
+		return
+	}
+	quota := overlay.quota
+	if isCloudflareChallengeResultError(resultErr) {
+		quota.BackoffLevel = auth.Quota.BackoffLevel
+	}
+	auth.Quota = quota
+}
+
+func isRuntimeQuotaResult(result Result) bool {
+	if result.Success || statusCodeFromResult(result.Error) != http.StatusTooManyRequests || shouldSkipCredentialCooldown(result.Error) {
+		return false
+	}
+	if result.Error != nil && result.Error.Code == quotaPollerErrorCode {
+		return false
+	}
+	return !isCloudflareChallengeResultError(result.Error)
+}
+
+func successClearsQuotaState(auth *Auth, modelKey string) bool {
+	if auth == nil {
+		return false
+	}
+	if modelKey == "" {
+		return quotaStateIsSet(auth.Quota)
+	}
+	if auth.Quota.Reason == quotaObservationErrorCode && auth.Quota.Exceeded {
+		return true
+	}
+
+	hasModelQuota := false
+	targetHasQuota := false
+	for model, state := range auth.ModelStates {
+		if state == nil || !quotaStateIsSet(state.Quota) {
+			continue
+		}
+		hasModelQuota = true
+		if canonicalModelKey(model) == modelKey {
+			targetHasQuota = true
+		}
+	}
+	if targetHasQuota {
+		return true
+	}
+	return quotaStateIsSet(auth.Quota) && !hasModelQuota
+}
+
+func quotaStateIsSet(quota QuotaState) bool {
+	return quota.Exceeded || quota.Reason != "" || !quota.NextRecoverAt.IsZero() || quota.BackoffLevel != 0
+}
+
+func advanceQuotaRevisionLocked(state *quotaCommitState) {
+	state.quotaRevision++
+	if state.quotaRevision == 0 {
+		state.quotaRevision = 1
 	}
 }
 
@@ -1303,13 +1456,25 @@ func updateAggregatedAvailability(auth *Auth, now time.Time) {
 		}
 		auth.Quota.NextRecoverAt = quotaRecover
 		auth.Quota.BackoffLevel = maxBackoffLevel
-	} else if auth.Quota.Exceeded && auth.Quota.NextRecoverAt.After(now) {
+	} else if shouldRetainAuthLevelQuota(auth, now) {
 		// Retain active auth-level quota cooldown
 	} else {
 		auth.Quota.Exceeded = false
 		auth.Quota.Reason = ""
 		auth.Quota.NextRecoverAt = time.Time{}
 		auth.Quota.BackoffLevel = 0
+	}
+}
+
+func shouldRetainAuthLevelQuota(auth *Auth, now time.Time) bool {
+	if auth == nil || !auth.Quota.Exceeded || auth.Quota.NextRecoverAt.IsZero() || !auth.Quota.NextRecoverAt.After(now) {
+		return false
+	}
+	switch strings.TrimSpace(auth.Quota.Reason) {
+	case "credential_quota", "cloudflare challenge":
+		return true
+	default:
+		return false
 	}
 }
 
