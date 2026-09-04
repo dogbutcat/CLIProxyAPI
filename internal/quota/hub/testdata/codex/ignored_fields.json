@@ -1,0 +1,43 @@
+{
+  "rate_limit": {
+    "allowed": true,
+    "limit_reached": false,
+    "primary_window": {
+      "used_percent": 10
+    }
+  },
+  "code_review_rate_limit": {
+    "allowed": false,
+    "limit_reached": true,
+    "primary_window": {
+      "used_percent": 100,
+      "reset_at": 4102444800
+    }
+  },
+  "additional_rate_limits": [
+    {
+      "rate_limit": {
+        "allowed": false,
+        "limit_reached": true,
+        "primary_window": {
+          "used_percent": 100,
+          "reset_at": 4102444800
+        }
+      }
+    }
+  ],
+  "rate_limit_reset_credits": {
+    "available_count": 0,
+    "next_grant_at": 4102444800
+  },
+  "nested": {
+    "rate_limit": {
+      "allowed": false,
+      "limit_reached": true,
+      "primary_window": {
+        "used_percent": 100,
+        "reset_at": 4102444800
+      }
+    }
+  }
+}

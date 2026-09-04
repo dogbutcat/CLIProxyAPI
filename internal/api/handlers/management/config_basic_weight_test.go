@@ -10,3 +10,12 @@ func TestNormalizeRoutingStrategyWeightedRoundRobin(t *testing.T) {
 		}
 	}
 }
+
+func TestNormalizeRoutingStrategySeqRandom(t *testing.T) {
+	for _, input := range []string{"seq-random", "sequential-random", "seqrandom", "sr"} {
+		got, ok := normalizeRoutingStrategy(input)
+		if !ok || got != "seq-random" {
+			t.Fatalf("normalizeRoutingStrategy(%q) = %q, %v; want seq-random, true", input, got, ok)
+		}
+	}
+}

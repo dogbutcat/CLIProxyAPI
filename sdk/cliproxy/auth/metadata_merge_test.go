@@ -404,3 +404,79 @@ func TestMergeRefreshedAuth(t *testing.T) {
 		}
 	})
 }
+
+func TestMergeExistingAuthMetadataPreservesCustomFields(t *testing.T) {
+	storage := &dummyMetadataStorage{}
+	target := &Auth{
+		Metadata: map[string]any{
+			"access_token": "fresh-access",
+			"prefix":       "incoming-prefix",
+		},
+		Storage: storage,
+	}
+	MergeExistingAuthMetadata(target, map[string]any{
+		"access_token":  "stale-access",
+		"refresh_token": "stale-refresh",
+		"expired":       "stale-expiry",
+		"prefix":        "existing-prefix",
+		"proxy_url":     "http://proxy:8080",
+		"websockets":    false,
+		"custom_note":   "keep me",
+		"weight":        float64(7),
+	})
+
+	if got := target.Metadata["access_token"]; got != "fresh-access" {
+		t.Fatalf("access_token = %v, want fresh-access", got)
+	}
+	if _, ok := target.Metadata["refresh_token"]; ok {
+		t.Fatalf("refresh_token from existing metadata was copied: %#v", target.Metadata)
+	}
+	if _, ok := target.Metadata["expired"]; ok {
+		t.Fatalf("expired from existing metadata was copied: %#v", target.Metadata)
+	}
+	if got := target.Metadata["prefix"]; got != "incoming-prefix" {
+		t.Fatalf("prefix = %v, want incoming-prefix", got)
+	}
+	if got := target.Metadata["proxy_url"]; got != "http://proxy:8080" {
+		t.Fatalf("proxy_url = %v, want existing custom value", got)
+	}
+	if got := target.Metadata["websockets"]; got != false {
+		t.Fatalf("websockets = %v, want false", got)
+	}
+	if got := target.Metadata["custom_note"]; got != "keep me" {
+		t.Fatalf("custom_note = %v, want keep me", got)
+	}
+	if got := target.Metadata["weight"]; got != float64(7) {
+		t.Fatalf("weight = %v, want 7", got)
+	}
+	if storage.meta == nil || storage.meta["custom_note"] != "keep me" {
+		t.Fatalf("storage metadata was not synchronized: %#v", storage.meta)
+	}
+}
+
+func TestIsAuthTokenPayloadKeyRecognizesLifecycleFields(t *testing.T) {
+	tokenKeys := []string{
+		" access_token ",
+		"REFRESH_TOKEN",
+		"id_token",
+		"session_id",
+		"expired",
+		"last_refresh",
+		"expires_in",
+		"timestamp",
+		"token_type",
+		"user_code",
+		"verification_uri",
+		"verification_uri_complete",
+	}
+	for _, key := range tokenKeys {
+		if !IsAuthTokenPayloadKey(key) {
+			t.Fatalf("IsAuthTokenPayloadKey(%q) = false, want true", key)
+		}
+	}
+	for _, key := range []string{"prefix", "proxy_url", "websockets", "custom_note", "weight"} {
+		if IsAuthTokenPayloadKey(key) {
+			t.Fatalf("IsAuthTokenPayloadKey(%q) = true, want false", key)
+		}
+	}
+}
