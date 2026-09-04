@@ -36,7 +36,7 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 		if optional {
 			if os.IsNotExist(err) || errors.Is(err, syscall.EISDIR) {
 				// Missing and optional: return empty config (cloud deploy standby).
-				cfg := &Config{CredentialInFlight: DefaultCredentialInFlightConfig()}
+				cfg := &Config{CredentialInFlight: DefaultCredentialInFlightConfig(), UsageImportSession: DefaultUsageImportSessionConfig()}
 				cfg.NormalizePluginsConfig()
 				return cfg, nil
 			}
@@ -46,14 +46,14 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 
 	// In cloud deploy mode (optional=true), if file is empty or contains only whitespace, return empty config.
 	if optional && len(bytes.TrimSpace(data)) == 0 {
-		cfg := &Config{CredentialInFlight: DefaultCredentialInFlightConfig()}
+		cfg := &Config{CredentialInFlight: DefaultCredentialInFlightConfig(), UsageImportSession: DefaultUsageImportSessionConfig()}
 		cfg.NormalizePluginsConfig()
 		return cfg, nil
 	}
 
 	if errValidate := validateCredentialWeightYAML(data); errValidate != nil {
 		if optional {
-			cfgOptional := &Config{CredentialInFlight: DefaultCredentialInFlightConfig()}
+			cfgOptional := &Config{CredentialInFlight: DefaultCredentialInFlightConfig(), UsageImportSession: DefaultUsageImportSessionConfig()}
 			cfgOptional.NormalizePluginsConfig()
 			return cfgOptional, nil
 		}
@@ -81,10 +81,11 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	cfg.Discovery.Subtypes = []string{"_chat-completions", "_responses", "_messages", "_generate-content", "_interactions"}
 	cfg.RemoteManagement.PanelGitHubRepository = DefaultPanelGitHubRepository
 	cfg.CredentialInFlight = DefaultCredentialInFlightConfig()
+	cfg.UsageImportSession = DefaultUsageImportSessionConfig()
 	if err = yaml.Unmarshal(data, &cfg); err != nil {
 		if optional {
 			// In cloud deploy mode, if YAML parsing fails, return empty config instead of error.
-			cfgOptional := &Config{CredentialInFlight: DefaultCredentialInFlightConfig()}
+			cfgOptional := &Config{CredentialInFlight: DefaultCredentialInFlightConfig(), UsageImportSession: DefaultUsageImportSessionConfig()}
 			cfgOptional.NormalizePluginsConfig()
 			return cfgOptional, nil
 		}
@@ -103,6 +104,9 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	}
 	if len(cfg.Discovery.Subtypes) == 0 {
 		cfg.Discovery.Subtypes = []string{"_chat-completions", "_responses", "_messages", "_generate-content", "_interactions"}
+	}
+	if errValidate := cfg.UsageImportSession.Validate(); errValidate != nil {
+		return nil, errValidate
 	}
 	if errValidate := cfg.Codex.LiveMediaRelay.Validate(); errValidate != nil {
 		return nil, errValidate
@@ -154,6 +158,11 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 		cfg.MaxRetryCredentials = 0
 	}
 
+	cfg.NormalizeRoutingConfig()
+	cfg.NormalizeOpenCodeGo()
+	if errValidate := cfg.ValidateOpenCodeGoConfig(); errValidate != nil {
+		return nil, errValidate
+	}
 	cfg.NormalizePluginsConfig()
 	if errResolvePluginsDir := cfg.ResolvePluginsDir(); errResolvePluginsDir != nil && cfg.Plugins.Enabled {
 		return nil, errResolvePluginsDir
@@ -176,6 +185,9 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 
 	// Sanitize Meta keys.
 	cfg.SanitizeMetaKeys()
+
+	// Sanitize Vision preprocessing configuration.
+	cfg.SanitizeVisionConfig()
 
 	// Sanitize Codex header defaults.
 	cfg.SanitizeCodexHeaderDefaults()

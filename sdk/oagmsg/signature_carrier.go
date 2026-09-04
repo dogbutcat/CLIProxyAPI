@@ -1,12 +1,15 @@
 package oagmsg
 
 import (
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"strings"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/cache"
 	sigcompat "github.com/router-for-me/CLIProxyAPI/v7/internal/signature"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -22,6 +25,165 @@ const (
 
 	oagmsgResponsesOutputItemMarker = "_oagmsg_responses_output_item"
 )
+
+func cacheGeminiResponsesTextSignatures(modelName, messageID, text string, signatures []string) bool {
+	if messageID == "" || text == "" || len(signatures) == 0 {
+		return false
+	}
+	textHash := fmt.Sprintf("%x", sha256.Sum256([]byte(text)))
+	items := make([][]byte, 0, len(signatures))
+	for _, signature := range signatures {
+		normalized, ok := compatibleGeminiResponsesCarrierSignature(signature, geminiResponsesCarrierText)
+		if !ok {
+			return false
+		}
+		item := []byte(`{"type":"thought_signature","targetKind":"text"}`)
+		item, _ = sjson.SetBytes(item, "thoughtSignature", normalized)
+		item, _ = sjson.SetBytes(item, "targetHash", textHash)
+		items = append(items, item)
+	}
+	return cache.CacheAntigravityReasoningReplayItems(
+		thinking.ParseSuffix(modelName).ModelName,
+		geminiResponsesTextReplaySessionKey(messageID),
+		items,
+	)
+}
+
+func restoreGeminiResponsesTextSignaturesForRequest(modelName string, rawJSON []byte) []byte {
+	input := gjson.GetBytes(rawJSON, "input")
+	if !input.IsArray() {
+		return rawJSON
+	}
+	restored, changed := restoreGeminiResponsesTextSignatureItems(modelName, input.Array())
+	if !changed {
+		return rawJSON
+	}
+	updated, err := sjson.SetRawBytes(rawJSON, "input", rawGJSONResultArray(restored))
+	if err != nil {
+		return rawJSON
+	}
+	return updated
+}
+
+func restoreGeminiResponsesTextSignatureItems(modelName string, items []gjson.Result) ([]gjson.Result, bool) {
+	restored := make([]gjson.Result, 0, len(items))
+	skip := make(map[int]bool)
+	changed := false
+	for index, item := range items {
+		if skip[index] {
+			changed = true
+			continue
+		}
+		restored = append(restored, item)
+		text, ok := openAIResponsesAssistantVisibleText(item)
+		messageID := strings.TrimSpace(item.Get("id").String())
+		if !ok || messageID == "" {
+			continue
+		}
+		cached, found := cache.GetAntigravityReasoningReplayItems(
+			thinking.ParseSuffix(modelName).ModelName,
+			geminiResponsesTextReplaySessionKey(messageID),
+		)
+		if !found {
+			continue
+		}
+		textHash := fmt.Sprintf("%x", sha256.Sum256([]byte(text)))
+		replayed := make(map[string]bool)
+		for _, raw := range cached {
+			entry := gjson.ParseBytes(raw)
+			if entry.Get("targetHash").String() != textHash {
+				continue
+			}
+			signature := strings.TrimSpace(entry.Get("thoughtSignature").String())
+			if signature == "" {
+				continue
+			}
+			carrier := []byte(`{"type":"reasoning","summary":[]}`)
+			carrier, _ = sjson.SetBytes(carrier, "encrypted_content", encodeGeminiResponsesCarrier(signature, geminiResponsesCarrierPrevious, geminiResponsesCarrierText))
+			restored = append(restored, gjson.ParseBytes(carrier))
+			replayed[signature] = true
+			changed = true
+		}
+		if len(replayed) == 0 {
+			continue
+		}
+		for adjacent := index + 1; adjacent < len(items) && isOpenAIResponsesDetachedCarrier(items[adjacent]); adjacent++ {
+			signature, direction, target, _, valid := decodeGeminiResponsesCarrier(items[adjacent].Get("encrypted_content").String())
+			if valid && direction == geminiResponsesCarrierPrevious && target == geminiResponsesCarrierText && replayed[signature] {
+				skip[adjacent] = true
+				changed = true
+			}
+		}
+	}
+	return restored, changed
+}
+
+func geminiResponsesTextReplaySessionKey(messageID string) string {
+	return "gemini-responses-text:" + strings.TrimSpace(messageID)
+}
+
+func openAIResponsesAssistantVisibleText(item gjson.Result) (string, bool) {
+	itemType := strings.TrimSpace(item.Get("type").String())
+	if itemType == "" && item.Get("role").Exists() {
+		itemType = "message"
+	}
+	if itemType != "message" {
+		return "", false
+	}
+	role := strings.ToLower(strings.TrimSpace(item.Get("role").String()))
+	if role != "" && role != "assistant" && role != "model" {
+		return "", false
+	}
+	content := item.Get("content")
+	if content.Type == gjson.String {
+		text := content.String()
+		return text, text != ""
+	}
+	if !content.IsArray() {
+		return "", false
+	}
+	var builder strings.Builder
+	for _, part := range content.Array() {
+		switch part.Get("type").String() {
+		case "output_text", "text":
+			builder.WriteString(part.Get("text").String())
+		}
+	}
+	if builder.Len() == 0 {
+		return "", false
+	}
+	return builder.String(), true
+}
+
+func isOpenAIResponsesDetachedCarrier(item gjson.Result) bool {
+	if item.Get("type").String() != "reasoning" {
+		return false
+	}
+	if strings.TrimSpace(item.Get("encrypted_content").String()) == "" {
+		return false
+	}
+	if summary := item.Get("summary"); summary.Exists() && summary.IsArray() && len(summary.Array()) > 0 {
+		return false
+	}
+	return true
+}
+
+func rawGJSONResultArray(items []gjson.Result) []byte {
+	var builder strings.Builder
+	builder.WriteByte('[')
+	for index, item := range items {
+		if index > 0 {
+			builder.WriteByte(',')
+		}
+		raw := item.Raw
+		if raw == "" {
+			raw = "null"
+		}
+		builder.WriteString(raw)
+	}
+	builder.WriteByte(']')
+	return []byte(builder.String())
+}
 
 func encodeGeminiResponsesCarrier(rawSignature, direction, targetKind string) string {
 	rawSignature = strings.TrimSpace(rawSignature)

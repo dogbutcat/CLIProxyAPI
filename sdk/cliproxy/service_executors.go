@@ -214,6 +214,7 @@ func baselineExecutorAuths() []*coreauth.Auth {
 		"devin",
 		"meta",
 		"openai-compatibility",
+		openCodeGoProviderKey,
 	}
 	auths := make([]*coreauth.Auth, 0, len(providers))
 	for _, provider := range providers {
@@ -311,6 +312,16 @@ func (s *Service) registerExecutorForAuth(a *coreauth.Auth, forceReplace bool) {
 		s.coreManager.RegisterExecutor(executor.NewDevinExecutor(cfg))
 	case "meta":
 		s.coreManager.RegisterExecutor(executor.NewMetaExecutor(cfg))
+	case openCodeGoProviderKey:
+		if !forceReplace {
+			if existingExecutor, hasExecutor := s.coreManager.Executor(openCodeGoProviderKey); hasExecutor {
+				if _, isOpenCodeGoExecutor := existingExecutor.(*executor.OpenCodeGoExecutor); isOpenCodeGoExecutor {
+					return
+				}
+				return
+			}
+		}
+		s.coreManager.RegisterExecutor(executor.NewOpenCodeGoExecutor(openCodeGoProviderKey, cfg))
 	default:
 		providerKey := strings.ToLower(strings.TrimSpace(a.Provider))
 		if providerKey == "" {
