@@ -38,10 +38,11 @@ func (h *InteractionsHandler) ParseRequest(rawJSON []byte) (*UnifiedRequest, err
 	}
 
 	req := &UnifiedRequest{
-		Model:          root.Get("model").String(),
-		Messages:       msgs,
-		SourceFormat:   FormatOpenAIResponse,
-		responsesTools: toolIndex,
+		Model:              root.Get("model").String(),
+		Messages:           msgs,
+		SourceFormat:       FormatOpenAIResponse,
+		responsesWebSearch: newResponsesWebSearchRequestMetadata(rawJSON),
+		responsesTools:     toolIndex,
 	}
 	if v := root.Get("parallel_tool_calls"); v.Exists() {
 		parallelToolCalls := v.Bool()

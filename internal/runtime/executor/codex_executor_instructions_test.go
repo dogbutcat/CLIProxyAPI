@@ -121,3 +121,28 @@ func TestCodexExecutorCountTokensTreatsNullInstructionsAsEmpty(t *testing.T) {
 		t.Fatalf("token count payload mismatch:\nnull=%s\nempty=%s", string(nullResp.Payload), string(emptyResp.Payload))
 	}
 }
+
+func TestCodexExecutorCountTokensPrivateBodyExcludesNormalFinalizerPolicy(t *testing.T) {
+	executor := NewCodexExecutor(&config.Config{})
+	body, _, err := executor.buildCodexTokenCountBody(context.Background(), cliproxyexecutor.Request{
+		Model: "gpt-5.4",
+		Payload: []byte(`{
+			"model":"gpt-5.4",
+			"stream":true,
+			"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]}]
+		}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai-response"),
+	}, "gpt-5.4")
+	if err != nil {
+		t.Fatalf("build token count body: %v", err)
+	}
+	if got := gjson.GetBytes(body, "stream"); got.Type != gjson.False {
+		t.Fatalf("token-count stream = %s, want false; body=%s", got.Raw, string(body))
+	}
+	for _, field := range []string{"store", "include", "parallel_tool_calls"} {
+		if got := gjson.GetBytes(body, field); got.Exists() {
+			t.Fatalf("token-count inherited normal finalizer field %q=%s; body=%s", field, got.Raw, string(body))
+		}
+	}
+}

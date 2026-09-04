@@ -76,6 +76,79 @@ func TestOpenAICompatExecutorCompactPassthrough(t *testing.T) {
 	}
 }
 
+func TestOpenAICompatExecutorResponsesToolOutputRequestContract(t *testing.T) {
+	var gotPath string
+	var gotBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		body, _ := io.ReadAll(r.Body)
+		gotBody = body
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"chatcmpl_tool_output","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`))
+	}))
+	defer server.Close()
+
+	executor := NewOpenAICompatExecutor("openai-compatibility", &config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"base_url": server.URL + "/v1",
+		"api_key":  "test",
+	}}
+	payload := []byte(`{
+		"model":"compat-model",
+		"input":[
+			{"type":"function_call","call_id":"call_image","name":"view_image","arguments":"{}"},
+			{
+				"type":"function_call_output",
+				"call_id":"call_image",
+				"output":[
+					{"type":"output_text","text":"Captured screenshot."},
+					{"type":"output_image","image_url":"data:image/png;base64,AA==","detail":"original"},
+					{"type":"input_image","image_url":"https://example.com/preview.png","detail":"unknown"}
+				]
+			}
+		]
+	}`)
+	_, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "compat-model",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat:   sdktranslator.FromString("openai-response"),
+		ResponseFormat: sdktranslator.FromString("openai"),
+		Stream:         false,
+	})
+	if err != nil {
+		t.Fatalf("Execute error: %v", err)
+	}
+	if gotPath != "/v1/chat/completions" {
+		t.Fatalf("path = %q, want %q", gotPath, "/v1/chat/completions")
+	}
+	if gjson.GetBytes(gotBody, "input").Exists() {
+		t.Fatalf("unexpected responses input in upstream body: %s", string(gotBody))
+	}
+	if got := gjson.GetBytes(gotBody, "messages.0.tool_calls.0.function.name").String(); got != "view_image" {
+		t.Fatalf("tool call name = %q, want view_image; body=%s", got, string(gotBody))
+	}
+	content := gjson.GetBytes(gotBody, "messages.1.content")
+	if !content.IsArray() {
+		t.Fatalf("tool output content = %s, want array; body=%s", content.Raw, string(gotBody))
+	}
+	if got := content.Get("0.text").String(); got != "Captured screenshot." {
+		t.Fatalf("text part = %q, want captured screenshot; body=%s", got, string(gotBody))
+	}
+	if got := content.Get("1.image_url.url").String(); got != "data:image/png;base64,AA==" {
+		t.Fatalf("first image URL = %q, want data URL; body=%s", got, string(gotBody))
+	}
+	if got := content.Get("1.image_url.detail").String(); got != "high" {
+		t.Fatalf("first image detail = %q, want high; body=%s", got, string(gotBody))
+	}
+	if got := content.Get("2.image_url.url").String(); got != "https://example.com/preview.png" {
+		t.Fatalf("second image URL = %q, want preview URL; body=%s", got, string(gotBody))
+	}
+	if detail := content.Get("2.image_url.detail"); detail.Exists() {
+		t.Fatalf("unknown detail should be omitted, got %q; body=%s", detail.String(), string(gotBody))
+	}
+}
+
 func TestOpenAICompatExecutorPayloadOverrideWinsOverThinkingSuffix(t *testing.T) {
 	var gotBody []byte
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -117,6 +190,54 @@ func TestOpenAICompatExecutorPayloadOverrideWinsOverThinkingSuffix(t *testing.T)
 	}
 	if got := gjson.GetBytes(gotBody, "reasoning_effort").String(); got != "low" {
 		t.Fatalf("reasoning_effort = %q, want %q; body=%s", got, "low", string(gotBody))
+	}
+}
+
+func TestOpenAICompatExecutorFinalizesNonStreamPayloadConfig(t *testing.T) {
+	var gotBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		gotBody = body
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"chatcmpl_1","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`))
+	}))
+	defer server.Close()
+
+	executor := NewOpenAICompatExecutor("openai-compatibility", &config.Config{
+		Payload: config.PayloadConfig{
+			Override: []config.PayloadRule{
+				{
+					Models: []config.PayloadModelRule{
+						{Name: "gpt-oss-120b-medium", Protocol: "openai"},
+					},
+					Params: map[string]any{
+						"priority":                     35,
+						"stream_options.include_usage": true,
+					},
+				},
+			},
+		},
+	})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"base_url": server.URL + "/v1",
+		"api_key":  "test",
+	}}
+	payload := []byte(`{"model":"gpt-oss-120b-medium","messages":[{"role":"user","content":"hi"}]}`)
+	_, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "gpt-oss-120b-medium",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai"),
+		Stream:       false,
+	})
+	if err != nil {
+		t.Fatalf("Execute error: %v", err)
+	}
+	if gjson.GetBytes(gotBody, "stream_options").Exists() {
+		t.Fatalf("non-stream upstream body kept stream_options: %s", string(gotBody))
+	}
+	if got := gjson.GetBytes(gotBody, "priority").Int(); got != 35 {
+		t.Fatalf("priority = %d, want 35; body=%s", got, string(gotBody))
 	}
 }
 
@@ -300,6 +421,63 @@ func TestOpenAICompatExecutorPromptCacheKeyCallerValueWinsPayloadOverride(t *tes
 	}
 }
 
+func TestOpenAICompatExecutorPromptCacheKeyClaudeBeatsTranslatedPayloadKey(t *testing.T) {
+	executor := NewOpenAICompatExecutor("openai-compatibility", &config.Config{
+		OpenAICompatibility: []config.OpenAICompatibility{{
+			Name:                  "compat",
+			SupportPromptCacheKey: true,
+		}},
+	})
+	auth := &cliproxyauth.Auth{
+		Provider: "openai-compatibility",
+		Attributes: map[string]string{
+			"compat_name":  "compat",
+			"provider_key": "compat",
+		},
+	}
+	payload := []byte(`{"model":"gpt-5.6","metadata":{"user_id":"{\"session_id\":\"cache-session\"}"}}`)
+	translated, errApply := executor.applyPromptCacheKey(
+		context.Background(),
+		auth,
+		sdktranslator.FromString("claude"),
+		"gpt-5.6",
+		cliproxyexecutor.Request{Model: "gpt-5.6", Payload: payload},
+		cliproxyexecutor.Options{},
+		[]byte(`{"model":"gpt-5.6","prompt_cache_key":"payload-config-key","messages":[]}`),
+	)
+	if errApply != nil {
+		t.Fatalf("applyPromptCacheKey error: %v", errApply)
+	}
+	if got := gjson.GetBytes(translated, "prompt_cache_key").String(); got == "" || got == "payload-config-key" {
+		t.Fatalf("prompt_cache_key = %q, want Claude-derived key", got)
+	}
+}
+
+func TestOpenAICompatExecutorPromptCacheKeyConsumesAuthMetadataProjection(t *testing.T) {
+	executor := NewOpenAICompatExecutor("openai-compatibility", &config.Config{})
+	auth := &cliproxyauth.Auth{
+		Provider: "openai-compatibility",
+		Metadata: map[string]any{
+			"support_prompt_cache_key": true,
+		},
+	}
+	translated, errApply := executor.applyPromptCacheKey(
+		context.Background(),
+		auth,
+		sdktranslator.FromString("openai"),
+		"gpt-5.6",
+		cliproxyexecutor.Request{Model: "gpt-5.6", Payload: []byte(`{"messages":[{"role":"user","content":"hello"}]}`)},
+		cliproxyexecutor.Options{Metadata: map[string]any{cliproxyexecutor.DerivedSessionIDMetadataKey: "ctx:v1:metadata-projection"}},
+		[]byte(`{"model":"gpt-5.6","messages":[]}`),
+	)
+	if errApply != nil {
+		t.Fatalf("applyPromptCacheKey error: %v", errApply)
+	}
+	if got := gjson.GetBytes(translated, "prompt_cache_key").String(); got == "" {
+		t.Fatalf("prompt_cache_key is missing for auth metadata projection: %s", string(translated))
+	}
+}
+
 func TestOpenAICompatExecutorPromptCacheKeyIsModelAndProtocolScoped(t *testing.T) {
 	executor := NewOpenAICompatExecutor("openai-compatibility", &config.Config{
 		OpenAICompatibility: []config.OpenAICompatibility{{
@@ -385,6 +563,53 @@ func TestOpenAICompatExecutorPromptCacheKeyUsesConfigIndex(t *testing.T) {
 			gotPresent := gjson.GetBytes(translated, "prompt_cache_key").String() != ""
 			if gotPresent != test.wantPresent {
 				t.Fatalf("prompt_cache_key present = %t, want %t; body=%s", gotPresent, test.wantPresent, string(translated))
+			}
+		})
+	}
+}
+
+func TestOpenAICompatExecutorPromptCacheKeyConfigIndexDoesNotFallbackToDuplicate(t *testing.T) {
+	executor := NewOpenAICompatExecutor("openai-compatibility", &config.Config{
+		OpenAICompatibility: []config.OpenAICompatibility{
+			{Name: "duplicate", SupportPromptCacheKey: true},
+			{Name: "duplicate", Disabled: true, SupportPromptCacheKey: true},
+		},
+	})
+	payload := []byte(`{"model":"gpt-5.6","metadata":{"user_id":"{\"session_id\":\"cache-session\"}"}}`)
+	for _, test := range []struct {
+		name        string
+		configIndex string
+	}{
+		{name: "disabled index", configIndex: "1"},
+		{name: "invalid index", configIndex: "9"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			auth := &cliproxyauth.Auth{
+				Provider: "openai-compatibility",
+				Attributes: map[string]string{
+					"compat_name":  "duplicate",
+					"provider_key": "duplicate",
+					"config_index": test.configIndex,
+					"source":       "config:duplicate[0]",
+				},
+				Metadata: map[string]any{
+					"support_prompt_cache_key": true,
+				},
+			}
+			translated, errApply := executor.applyPromptCacheKey(
+				context.Background(),
+				auth,
+				sdktranslator.FromString("claude"),
+				"gpt-5.6",
+				cliproxyexecutor.Request{Model: "gpt-5.6", Payload: payload},
+				cliproxyexecutor.Options{},
+				[]byte(`{"model":"gpt-5.6","messages":[]}`),
+			)
+			if errApply != nil {
+				t.Fatalf("applyPromptCacheKey error: %v", errApply)
+			}
+			if gjson.GetBytes(translated, "prompt_cache_key").Exists() {
+				t.Fatalf("unexpected prompt_cache_key after duplicate fallback: %s", string(translated))
 			}
 		})
 	}

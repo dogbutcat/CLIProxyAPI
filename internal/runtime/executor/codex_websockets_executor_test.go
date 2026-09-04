@@ -247,15 +247,15 @@ func TestCodexWebsocketsExecuteResponsesLiteDoesNotInjectImageGenerationTool(t *
 			t.Fatalf("responses-lite metadata = %q, want true; payload=%s", got, payload)
 		}
 		parallelToolCalls := gjson.GetBytes(payload, "parallel_tool_calls")
-		if !parallelToolCalls.Exists() || parallelToolCalls.Bool() {
-			t.Fatalf("responses-lite parallel_tool_calls should be false: %s", payload)
+		if !parallelToolCalls.Exists() || !parallelToolCalls.Bool() {
+			t.Fatalf("responses-lite parallel_tool_calls should follow final wire true: %s", payload)
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("timed out waiting for upstream websocket payload")
 	}
 }
 
-func TestCodexWebsocketsExecuteStreamResponsesLiteForcesParallelToolCallsFalse(t *testing.T) {
+func TestCodexWebsocketsExecuteStreamResponsesLiteFollowsFinalWireParallelToolCalls(t *testing.T) {
 	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
 	capturedPayload := make(chan []byte, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -318,8 +318,8 @@ func TestCodexWebsocketsExecuteStreamResponsesLiteForcesParallelToolCallsFalse(t
 	select {
 	case payload := <-capturedPayload:
 		parallelToolCalls := gjson.GetBytes(payload, "parallel_tool_calls")
-		if !parallelToolCalls.Exists() || parallelToolCalls.Bool() {
-			t.Fatalf("responses-lite parallel_tool_calls should be false: %s", payload)
+		if !parallelToolCalls.Exists() || !parallelToolCalls.Bool() {
+			t.Fatalf("responses-lite parallel_tool_calls should follow final wire true: %s", payload)
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("timed out waiting for upstream websocket payload")
@@ -1120,9 +1120,10 @@ func TestApplyCodexWebsocketHeadersDefaultsToCurrentResponsesBeta(t *testing.T) 
 
 func TestApplyCodexWebsocketHeadersDefaultsToCodexCloaking(t *testing.T) {
 	tests := []struct {
-		name  string
-		auth  *cliproxyauth.Auth
-		token string
+		name      string
+		auth      *cliproxyauth.Auth
+		token     string
+		nilConfig bool
 	}{
 		{
 			name: "OAuth",
@@ -1131,6 +1132,18 @@ func TestApplyCodexWebsocketHeadersDefaultsToCodexCloaking(t *testing.T) {
 				Attributes: map[string]string{
 					"header:User-Agent": "custom-ua",
 					"header:Originator": "custom-origin",
+				},
+			},
+		},
+		{
+			name:      "OAuth nil config",
+			nilConfig: true,
+			auth: &cliproxyauth.Auth{
+				Provider: "codex",
+				Attributes: map[string]string{
+					"header:User-Agent": "custom-ua",
+					"header:Originator": "custom-origin",
+					"header:X-Custom":   "custom-value",
 				},
 			},
 		},
@@ -1153,6 +1166,9 @@ func TestApplyCodexWebsocketHeadersDefaultsToCodexCloaking(t *testing.T) {
 			cfg := &config.Config{
 				CodexHeaderDefaults: config.CodexHeaderDefaults{UserAgent: "config-ua"},
 			}
+			if tt.nilConfig {
+				cfg = nil
+			}
 			ctx := contextWithGinHeaders(map[string]string{
 				"User-Agent": "client-ua",
 				"Originator": "client-origin",
@@ -1169,7 +1185,36 @@ func TestApplyCodexWebsocketHeadersDefaultsToCodexCloaking(t *testing.T) {
 			if got := headers.Get("Originator"); got != codexOriginator {
 				t.Fatalf("Originator = %q, want %q", got, codexOriginator)
 			}
+			if tt.name == "OAuth nil config" {
+				if got := headers.Get("X-Custom"); got != "custom-value" {
+					t.Fatalf("X-Custom = %q, want custom-value", got)
+				}
+			}
 		})
+	}
+}
+
+func TestCodexWebsocketHeadersDisabledCloakingPreservesCustomIdentity(t *testing.T) {
+	cfg := &config.Config{Codex: config.CodexConfig{DisableCodexCloaking: true}}
+	auth := &cliproxyauth.Auth{
+		Provider: "codex",
+		Attributes: map[string]string{
+			"header:User-Agent": "custom-ua",
+			"header:Originator": "custom-origin",
+			"header:X-Custom":   "custom-value",
+		},
+	}
+
+	headers := applyCodexWebsocketHeaders(context.Background(), http.Header{}, auth, "", cfg)
+
+	if got := headers.Get("User-Agent"); got != "custom-ua" {
+		t.Fatalf("User-Agent = %q, want custom-ua", got)
+	}
+	if got := headers.Get("Originator"); got != "custom-origin" {
+		t.Fatalf("Originator = %q, want custom-origin", got)
+	}
+	if got := headers.Get("X-Custom"); got != "custom-value" {
+		t.Fatalf("X-Custom = %q, want custom-value", got)
 	}
 }
 
@@ -1436,11 +1481,12 @@ func TestApplyCodexWebsocketHeadersIgnoresConfigForAPIKeyAuth(t *testing.T) {
 	}
 }
 
-func TestApplyCodexWebsocketHeadersPreservesExplicitAPIKeyUserAgent(t *testing.T) {
+func TestApplyCodexWebsocketHeadersPreservesExplicitAPIKeyUserAgentWhenCloakingDisabled(t *testing.T) {
+	cfg := &config.Config{Codex: config.CodexConfig{DisableCodexCloaking: true}}
 	auth := &cliproxyauth.Auth{Provider: "codex", Attributes: map[string]string{"api_key": "sk-test"}}
 	ctx := contextWithGinHeaders(map[string]string{"User-Agent": "api-key-client/1.0", "Originator": "explicit-origin"})
 
-	headers := applyCodexWebsocketHeaders(ctx, http.Header{}, auth, "sk-test", nil, false)
+	headers := applyCodexWebsocketHeaders(ctx, http.Header{}, auth, "sk-test", cfg, false)
 
 	if got := headers.Get("User-Agent"); got != "api-key-client/1.0" {
 		t.Fatalf("User-Agent = %s, want api-key-client/1.0", got)

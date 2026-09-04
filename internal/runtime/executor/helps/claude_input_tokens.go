@@ -13,6 +13,7 @@ import (
 	"github.com/tidwall/sjson"
 	"github.com/tiktoken-go/tokenizer"
 
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/oagmsg"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 )
 
@@ -53,7 +54,7 @@ func TranslateStreamWithClaudeInputTokens(
 	param *any,
 	state *ClaudeInputTokenState,
 ) [][]byte {
-	chunks := sdktranslator.TranslateStream(
+	chunks := oagmsg.TranslateStream(
 		ctx,
 		upstreamFormat,
 		responseFormat,

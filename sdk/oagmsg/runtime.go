@@ -2,10 +2,13 @@ package oagmsg
 
 import (
 	"context"
+	"strconv"
 	"strings"
 	"sync"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -81,6 +84,12 @@ type RequestTranslationOptions struct {
 	// PreserveThinkingBlocks keeps unsigned and opaque thinking history for
 	// explicitly configured third-party compatibility endpoints.
 	PreserveThinkingBlocks bool
+
+	// AllowResponsesAgentMessages enables Codex multi-agent Responses input
+	// normalization for call sites that already passed the client/config gate.
+	AllowResponsesAgentMessages bool
+
+	modelInfo *registry.ModelInfo
 }
 
 // TranslateRequest converts a request directly through oagmsg.
@@ -88,22 +97,42 @@ func TranslateRequest[From ~string, To ~string](fromValue From, toValue To, mode
 	return TranslateRequestWithOptions(fromValue, toValue, model, rawJSON, stream, RequestTranslationOptions{})
 }
 
+// TranslateRequestEnvelopeWithOptions converts a request envelope through
+// oagmsg while preserving request-scoped metadata used by provider serializers.
+func TranslateRequestEnvelopeWithOptions[From ~string, To ~string](ctx context.Context, fromValue From, toValue To, req sdktranslator.RequestEnvelope, options RequestTranslationOptions) sdktranslator.RequestEnvelope {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	options.modelInfo = req.ModelInfo
+	from := Format(fromValue)
+	to := Format(toValue)
+	req.Body = translateRequestWithOptionsContext(ctx, from, to, req.Model, req.Body, req.Stream, options)
+	req.Format = sdktranslator.Format(to.String())
+	return req
+}
+
 // TranslateRequestWithOptions converts a request directly through oagmsg with
 // explicit per-call compatibility behavior.
 func TranslateRequestWithOptions[From ~string, To ~string](fromValue From, toValue To, model string, rawJSON []byte, stream bool, options RequestTranslationOptions) []byte {
 	from := Format(fromValue)
 	to := Format(toValue)
-	hooks := currentPluginHooks()
+	return translateRequestWithOptionsContext(context.Background(), from, to, model, rawJSON, stream, options)
+}
 
-	switch translationPath := selectRequestTranslationPath(from, to, model, rawJSON, hooks); translationPath {
+func translateRequestWithOptionsContext(ctx context.Context, from, to Format, model string, rawJSON []byte, stream bool, options RequestTranslationOptions) []byte {
+	hooks := currentPluginHooks()
+	body := normalizeResponsesAgentMessagesForTranslation(from, to, rawJSON, options)
+	body = restoreGeminiResponsesTextSignaturesForTarget(from, to, model, body)
+
+	switch translationPath := selectRequestTranslationPath(from, to, model, body, hooks); translationPath {
 	case requestTranslationPathIdentity:
-		return finalizeRequestForTarget(to, rawJSON, stream)
+		return finalizeRequestForTarget(to, body, stream)
 	case requestTranslationPathSameWire:
 		fallthrough
 	case requestTranslationPathCodexFinalize:
-		body := setRuntimeModel(rawJSON, model)
+		body := setRuntimeModel(body, model)
 		if hooks != nil {
-			body = hooks.NormalizeRequest(context.Background(), from, to, model, body, stream)
+			body = hooks.NormalizeRequest(ctx, from, to, model, body, stream)
 		}
 		body = applyCodexRequestMetadataForTarget(to, body, rawJSON)
 		// Codex target constraints must be enforced after same-family hooks
@@ -115,20 +144,20 @@ func TranslateRequestWithOptions[From ~string, To ~string](fromValue From, toVal
 	registry := DefaultRegistry()
 	source, sourceOK := registry.Get(from)
 	target, targetOK := registry.Get(to)
-	body := rawJSON
 	if sourceOK && targetOK {
-		summaryConfig := thinking.ExtractSummaryConfig(rawJSON, from.String())
-		req, err := source.ParseRequest(rawJSON)
+		summaryConfig := thinking.ExtractSummaryConfig(body, from.String())
+		req, err := source.ParseRequest(body)
 		if err == nil {
 			req.Model = modelOrExisting(model, req.Model)
 			req.Stream = stream
 			req.translationOptions = options
+			req.modelInfo = options.modelInfo
 			body, err = target.SerializeRequest(req)
 			if err == nil {
 				body = preserveUnknownFieldsForSource(from, rawJSON, body)
 				body = thinking.ApplySummaryConfigForModel(body, to.String(), req.Model, summaryConfig)
 				if hooks != nil {
-					body = hooks.NormalizeRequest(context.Background(), from, to, req.Model, body, stream)
+					body = hooks.NormalizeRequest(ctx, from, to, req.Model, body, stream)
 				}
 				body = applyCodexRequestMetadataForTarget(to, body, rawJSON)
 				body = applyOpenAIChatCodexRequestDefaults(from, to, body)
@@ -146,9 +175,9 @@ func TranslateRequestWithOptions[From ~string, To ~string](fromValue From, toVal
 		body = applyOpenAIChatCodexRequestDefaults(from, to, body)
 		return finalizeRequestForTarget(to, body, stream)
 	}
-	body = hooks.NormalizeRequest(context.Background(), from, to, model, body, stream)
+	body = hooks.NormalizeRequest(ctx, from, to, model, body, stream)
 	summaryConfig := thinking.ExtractSummaryConfig(body, from.String())
-	if translated, ok := hooks.TranslateRequest(context.Background(), from, to, model, body, stream); ok {
+	if translated, ok := hooks.TranslateRequest(ctx, from, to, model, body, stream); ok {
 		translated = thinking.ApplySummaryConfigForModel(translated, to.String(), model, summaryConfig)
 		translated = applyCodexRequestMetadataForTarget(to, translated, rawJSON)
 		translated = applyOpenAIChatCodexRequestDefaults(from, to, translated)
@@ -157,6 +186,96 @@ func TranslateRequestWithOptions[From ~string, To ~string](fromValue From, toVal
 	body = applyCodexRequestMetadataForTarget(to, body, rawJSON)
 	body = applyOpenAIChatCodexRequestDefaults(from, to, body)
 	return finalizeRequestForTarget(to, body, stream)
+}
+
+func restoreGeminiResponsesTextSignaturesForTarget(from, to Format, model string, body []byte) []byte {
+	source := resolveFormat(from)
+	target := resolveFormat(to)
+	if source != FormatOpenAIResponse && source != FormatCodex {
+		return body
+	}
+	if target != FormatGemini && target != FormatAntigravity {
+		return body
+	}
+	replayModel := strings.TrimSpace(model)
+	if replayModel == "" {
+		replayModel = requestModelName(body)
+	}
+	return restoreGeminiResponsesTextSignaturesForRequest(replayModel, body)
+}
+
+func normalizeResponsesAgentMessagesForTranslation(from, to Format, rawJSON []byte, options RequestTranslationOptions) []byte {
+	if !options.AllowResponsesAgentMessages || resolveFormat(from) != FormatOpenAIResponse {
+		return rawJSON
+	}
+	target := resolveFormat(to)
+	if target == FormatOpenAIResponse || target == FormatCodex {
+		return rawJSON
+	}
+	input := gjson.GetBytes(rawJSON, "input")
+	if !input.IsArray() {
+		return rawJSON
+	}
+
+	updated := rawJSON
+	changed := false
+	for itemIndex, item := range input.Array() {
+		if strings.TrimSpace(item.Get("type").String()) != "agent_message" {
+			continue
+		}
+		itemPath := "input." + strconv.Itoa(itemIndex)
+		var errSet error
+		updated, errSet = sjson.SetBytes(updated, itemPath+".type", "message")
+		if errSet != nil {
+			return rawJSON
+		}
+		updated, errSet = sjson.SetBytes(updated, itemPath+".role", "user")
+		if errSet != nil {
+			return rawJSON
+		}
+		next, ok := normalizeResponsesAgentMessageContent(updated, itemPath, item)
+		if !ok {
+			return rawJSON
+		}
+		updated = next
+		changed = true
+	}
+	if !changed {
+		return rawJSON
+	}
+	return updated
+}
+
+func normalizeResponsesAgentMessageContent(rawJSON []byte, itemPath string, item gjson.Result) ([]byte, bool) {
+	content := item.Get("content")
+	if !content.IsArray() {
+		return rawJSON, true
+	}
+	updated := rawJSON
+	for partIndex, part := range content.Array() {
+		if strings.TrimSpace(part.Get("type").String()) != "encrypted_content" {
+			continue
+		}
+		encrypted := part.Get("encrypted_content")
+		if encrypted.Type != gjson.String {
+			continue
+		}
+		partPath := itemPath + ".content." + strconv.Itoa(partIndex)
+		var errSet error
+		updated, errSet = sjson.SetBytes(updated, partPath+".type", "input_text")
+		if errSet != nil {
+			return rawJSON, false
+		}
+		updated, errSet = sjson.SetBytes(updated, partPath+".text", encrypted.String())
+		if errSet != nil {
+			return rawJSON, false
+		}
+		updated, errSet = sjson.DeleteBytes(updated, partPath+".encrypted_content")
+		if errSet != nil {
+			return rawJSON, false
+		}
+	}
+	return updated, true
 }
 
 type requestPathKind int

@@ -84,9 +84,6 @@ func TestWriteClaudeErrorResponse_IncludesRetryAfterForModelCooldownDefaultSetti
 	c, _ := gin.CreateTestContext(recorder)
 	handler := &ClaudeCodeAPIHandler{}
 
-	cooldownErr := coreauth.NewManager(nil, nil, nil)
-	_ = cooldownErr
-	// Create mock model cooldown error
 	msg := &interfaces.ErrorMessage{
 		StatusCode: http.StatusTooManyRequests,
 		Error:      coreauth.NewModelCooldownError("claude-sonnet-4-6", "claude", 20*time.Second),
@@ -99,6 +96,33 @@ func TestWriteClaudeErrorResponse_IncludesRetryAfterForModelCooldownDefaultSetti
 	}
 	if got := recorder.Header().Get("Retry-After"); got != "20" {
 		t.Fatalf("Retry-After = %q, want 20", got)
+	}
+}
+
+func TestWriteClaudeErrorResponsePreservesClaudeUpstreamErrorDetails(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	handler := &ClaudeCodeAPIHandler{}
+	msg := &interfaces.ErrorMessage{
+		StatusCode: http.StatusTooManyRequests,
+		Error:      errors.New(`{"type":"error","error":{"type":"rate_limit_error","message":"Usage credits are required for this model.","details":{"error_code":"credits_required","disabled_reason":"org_level_disabled","model":"claude-fable-5"}},"request_id":"req_mock_429"}`),
+	}
+
+	handler.WriteErrorResponse(c, msg)
+
+	if recorder.Code != http.StatusTooManyRequests {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusTooManyRequests)
+	}
+	body := recorder.Body.Bytes()
+	if got := gjson.GetBytes(body, "error.details.error_code").String(); got != "credits_required" {
+		t.Fatalf("error.details.error_code = %q; body=%s", got, body)
+	}
+	if got := gjson.GetBytes(body, "error.details.disabled_reason").String(); got != "org_level_disabled" {
+		t.Fatalf("error.details.disabled_reason = %q; body=%s", got, body)
+	}
+	if got := gjson.GetBytes(body, "request_id").String(); got != "req_mock_429" {
+		t.Fatalf("request_id = %q; body=%s", got, body)
 	}
 }
 

@@ -18,6 +18,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/oagmsg"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -42,9 +43,10 @@ func translateCodexRequestPairWithUpdateIntent(from, to sdktranslator.Format, mo
 	ctx := context.Background()
 	translate := func(raw []byte) ([]byte, bool) {
 		if isCompat && from == sdktranslator.FormatClaude && to == sdktranslator.FormatCodex {
-			return helps.TranslateRequestWithAPIKeyModelCompatibility(ctx, nil, nil, from, to, model, raw, stream, true), false
+			translated := oagmsg.TranslateRequestEnvelopeWithOptions(ctx, from, to, sdktranslator.RequestEnvelope{Format: from, Model: model, Stream: stream, Body: raw}, oagmsg.RequestTranslationOptions{PreserveThinkingBlocks: true})
+			return translated.Body, translated.ConfigurationUpdatesChanged
 		}
-		translated := sdktranslator.TranslateRequestEnvelope(ctx, from, to, sdktranslator.RequestEnvelope{Format: from, Model: model, Stream: stream, Body: raw})
+		translated := oagmsg.TranslateRequestEnvelopeWithOptions(ctx, from, to, sdktranslator.RequestEnvelope{Format: from, Model: model, Stream: stream, Body: raw}, oagmsg.RequestTranslationOptions{})
 		return translated.Body, translated.ConfigurationUpdatesChanged
 	}
 	if bytes.Equal(originalPayload, payload) {
@@ -321,6 +323,7 @@ func normalizeCodexInstructions(body []byte, nativeRequest ...bool) []byte {
 	if len(nativeRequest) > 0 && nativeRequest[0] {
 		return body
 	}
+
 	instructions := gjson.GetBytes(body, "instructions")
 	if !instructions.Exists() || instructions.Type == gjson.Null {
 		body, _ = sjson.SetBytes(body, "instructions", "")
