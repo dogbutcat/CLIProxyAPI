@@ -521,16 +521,26 @@ func resolveClaudeKeyConfig(cfg *config.Config, auth *cliproxyauth.Auth) *config
 		entry := &cfg.ClaudeKey[i]
 		cfgKey := strings.TrimSpace(entry.APIKey)
 		cfgBase := strings.TrimSpace(entry.BaseURL)
-		if !strings.EqualFold(cfgKey, apiKey) {
-			continue
+		if strings.EqualFold(cfgKey, apiKey) && claudeBaseURLCompatible(cfgBase, baseURL) {
+			return entry
 		}
-		if baseURL != "" && cfgBase != "" && !strings.EqualFold(cfgBase, baseURL) {
-			continue
+		for j := range entry.APIKeyEntries {
+			childKey := strings.TrimSpace(entry.APIKeyEntries[j].APIKey)
+			childBase := strings.TrimSpace(entry.APIKeyEntries[j].BaseURL)
+			if childBase == "" {
+				childBase = cfgBase
+			}
+			if childKey != "" && strings.EqualFold(childKey, apiKey) && claudeBaseURLCompatible(childBase, baseURL) {
+				return entry
+			}
 		}
-		return entry
 	}
 
 	return nil
+}
+
+func claudeBaseURLCompatible(cfgBase, authBase string) bool {
+	return authBase == "" || cfgBase == "" || strings.EqualFold(cfgBase, authBase)
 }
 
 // resolveClaudeKeyCloakConfig finds the matching ClaudeKey config and returns its CloakConfig.

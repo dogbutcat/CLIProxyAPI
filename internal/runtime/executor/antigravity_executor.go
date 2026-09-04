@@ -19,9 +19,9 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	internalsignature "github.com/router-for-me/CLIProxyAPI/v7/internal/signature"
-	antigravityclaude "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/antigravity/claude"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/oagmsg"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/proxyutil"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 	log "github.com/sirupsen/logrus"
@@ -588,23 +588,23 @@ func validateAntigravityRequestSignatures(ctx context.Context, modelName string,
 	}
 	before := countClaudeThinkingBlocks(rawJSON)
 	if antigravityUsesReasoningReplayCache(modelName) {
-		rawJSON = antigravityclaude.StripInvalidGeminiSignatureThinkingBlocks(rawJSON)
+		rawJSON = oagmsg.StripInvalidGeminiSignatureThinkingBlocks(rawJSON)
 		logAntigravitySignatureStrip(before, countClaudeThinkingBlocks(rawJSON), "provider_cleanup", "empty_or_non_gemini_signature")
 		return rawJSON, nil
 	}
 	// Claude models accept only Claude-format thinking signatures.
-	rawJSON = antigravityclaude.StripEmptySignatureThinkingBlocks(rawJSON)
+	rawJSON = oagmsg.StripEmptySignatureThinkingBlocks(rawJSON)
 	logAntigravitySignatureStrip(before, countClaudeThinkingBlocks(rawJSON), "prefix_cleanup", "empty_or_non_claude_signature")
 	if cache.SignatureCacheEnabled() {
 		return rawJSON, nil
 	}
 	if !cache.SignatureBypassStrictMode() {
-		// Non-strict bypass: let the translator handle invalid signatures
+		// Non-strict bypass: let request conversion handle invalid signatures
 		// by dropping unsigned thinking blocks silently (no 400).
 		return rawJSON, nil
 	}
 	before = countClaudeThinkingBlocks(rawJSON)
-	rawJSON = antigravityclaude.StripInvalidBypassSignatureThinkingBlocks(rawJSON)
+	rawJSON = oagmsg.StripInvalidBypassSignatureThinkingBlocks(rawJSON)
 	logAntigravitySignatureStrip(before, countClaudeThinkingBlocks(rawJSON), "strict_bypass", "invalid_antigravity_claude_signature")
 	return rawJSON, nil
 }

@@ -812,7 +812,7 @@ func applyClaudeHeadersWithNativeProfile(
 	useOAuthBetas := fp.UseOAuthBetas
 	isAnthropicBase := isAnthropicUpstreamURL(r.URL)
 	if strings.TrimSpace(apiKey) != "" {
-		if isAnthropicBase && useAPIKey {
+		if claudeUsesXAPIKeyHeader(r, auth, useAPIKey) {
 			r.Header.Del("Authorization")
 			r.Header.Set("x-api-key", apiKey)
 		} else {
@@ -998,7 +998,7 @@ func applyClaudeHeadersWithNativeProfile(
 		} else if stream {
 			restoreCallerTransport()
 		}
-		return nil
+		return validateClaudeAuthHeaders(r.Header)
 	}
 
 	identityHeader := func(name, fallback string) {
@@ -1124,7 +1124,43 @@ func applyClaudeHeadersWithNativeProfile(
 		// silently disable event negotiation.
 		applyTransportNegotiation()
 	}
+	if errAuthHeaders := validateClaudeAuthHeaders(r.Header); errAuthHeaders != nil {
+		return errAuthHeaders
+	}
 	return nil
+}
+
+func validateClaudeAuthHeaders(headers http.Header) error {
+	if headers == nil {
+		return nil
+	}
+	if strings.TrimSpace(headers.Get("Authorization")) != "" && strings.TrimSpace(headers.Get("x-api-key")) != "" {
+		return fmt.Errorf("claude executor: refusing to send both Authorization and x-api-key headers")
+	}
+	return nil
+}
+
+func claudeUsesAPIKeyAuth(a *cliproxyauth.Auth) bool {
+	return a != nil && a.Attributes != nil && strings.TrimSpace(a.Attributes["api_key"]) != ""
+}
+
+func claudeUsesXAPIKeyHeader(r *http.Request, auth *cliproxyauth.Auth, useAPIKey bool) bool {
+	if !useAPIKey {
+		return false
+	}
+	if r != nil && isAnthropicUpstreamURL(r.URL) {
+		return true
+	}
+	if auth == nil || auth.Attributes == nil {
+		return false
+	}
+	if !strings.EqualFold(strings.TrimSpace(auth.Attributes["provider_key"]), "opencode-go") {
+		return false
+	}
+	// Rebase guard: OpenCode Go's projected Anthropic route may arrive as the
+	// canonical "claude" protocol; both names must use x-api-key, not Bearer.
+	protocol := strings.TrimSpace(auth.Attributes["protocol"])
+	return strings.EqualFold(protocol, "anthropic") || strings.EqualFold(protocol, "claude")
 }
 
 // doClaudeUpstreamRequest is the single send boundary for every Claude upstream

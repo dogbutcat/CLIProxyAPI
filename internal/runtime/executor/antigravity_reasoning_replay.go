@@ -130,7 +130,7 @@ func antigravityReasoningReplayClientSessionKey(ctx context.Context, req cliprox
 			continue
 		}
 		for _, path := range []string{"session_id", "metadata.session_id"} {
-			if value := strings.TrimSpace(gjson.GetBytes(raw, path).String()); value != "" {
+			if value := strings.TrimSpace(util.GetGJSONBytesNoCopy(raw, path).String()); value != "" {
 				return "responses:" + value
 			}
 		}
@@ -142,7 +142,7 @@ func antigravityReasoningReplayClientSessionKey(ctx context.Context, req cliprox
 		return "execution:" + value
 	}
 	for _, raw := range [][]byte{opts.OriginalRequest, req.Payload} {
-		if value := strings.TrimSpace(gjson.GetBytes(raw, "prompt_cache_key").String()); value != "" {
+		if value := strings.TrimSpace(util.GetGJSONBytesNoCopy(raw, "prompt_cache_key").String()); value != "" {
 			return "prompt-cache:" + value
 		}
 	}
@@ -197,7 +197,7 @@ func antigravityReplaySessionIDFromPayload(payload []byte) string {
 		return ""
 	}
 	for _, path := range []string{"sessionId", "session_id", "request.sessionId", "request.session_id"} {
-		if id := strings.TrimSpace(gjson.GetBytes(payload, path).String()); id != "" {
+		if id := strings.TrimSpace(util.GetGJSONBytesNoCopy(payload, path).String()); id != "" {
 			return id
 		}
 	}
@@ -767,7 +767,7 @@ func filterAntigravityReasoningReplayItemsForRequestWithIndex(
 ) [][]byte {
 	filtered := make([][]byte, 0, len(items))
 	for _, item := range items {
-		itemResult := gjson.ParseBytes(item)
+		itemResult := util.ParseGJSONBytesNoCopy(item)
 		switch strings.TrimSpace(itemResult.Get("type").String()) {
 		case "function_call_part":
 			signature := strings.TrimSpace(itemResult.Get("thoughtSignature").String())
@@ -1185,7 +1185,7 @@ func insertAntigravityModelFunctionCallBeforeContent(payload []byte, beforeIndex
 
 func appendAntigravityFunctionCallToModelContent(payload []byte, contentIndex int, name, callID, thoughtSig string, args gjson.Result) ([]byte, bool) {
 	contentPath := fmt.Sprintf("request.contents.%d", contentIndex)
-	if !strings.EqualFold(strings.TrimSpace(gjson.GetBytes(payload, contentPath+".role").String()), "model") || !gjson.GetBytes(payload, contentPath+".parts").IsArray() {
+	if !strings.EqualFold(strings.TrimSpace(util.GetGJSONBytesNoCopy(payload, contentPath+".role").String()), "model") || !util.GetGJSONBytesNoCopy(payload, contentPath+".parts").IsArray() {
 		return payload, false
 	}
 	fc := map[string]any{"name": name}
@@ -1198,7 +1198,7 @@ func appendAntigravityFunctionCallToModelContent(payload []byte, contentIndex in
 	part := map[string]any{"functionCall": fc}
 	if thoughtSig == "" {
 		hasFunctionCall := false
-		gjson.GetBytes(payload, contentPath+".parts").ForEach(func(_, existingPart gjson.Result) bool {
+		util.GetGJSONBytesNoCopy(payload, contentPath+".parts").ForEach(func(_, existingPart gjson.Result) bool {
 			hasFunctionCall = existingPart.Get("functionCall").Exists()
 			return !hasFunctionCall
 		})
@@ -1219,7 +1219,7 @@ func appendAntigravityFunctionCallToModelContent(payload []byte, contentIndex in
 func antigravityRemoveThoughtSignatureFromOtherParts(payload []byte, contentIndex int, signature, keepPartPath string) []byte {
 	signature = strings.TrimSpace(signature)
 	partsPath := fmt.Sprintf("request.contents.%d.parts", contentIndex)
-	parts := gjson.GetBytes(payload, partsPath)
+	parts := util.GetGJSONBytesNoCopy(payload, partsPath)
 	if signature == "" || !parts.IsArray() {
 		return payload
 	}
@@ -1794,7 +1794,7 @@ func antigravityExistingReplayPartPath(payload []byte, contentIndex int, partInd
 		return "", false
 	}
 	partsPath := fmt.Sprintf("request.contents.%d.parts", contentIndex)
-	parts := gjson.GetBytes(payload, partsPath)
+	parts := util.GetGJSONBytesNoCopy(payload, partsPath)
 	if !parts.IsArray() {
 		return "", false
 	}
@@ -1810,7 +1810,7 @@ func antigravityReplayPartWritePath(payload []byte, contentIndex int, partIndex 
 		return path
 	}
 	partsPath := fmt.Sprintf("request.contents.%d.parts", contentIndex)
-	if gjson.GetBytes(payload, partsPath).IsArray() {
+	if util.GetGJSONBytesNoCopy(payload, partsPath).IsArray() {
 		return partsPath + ".-1"
 	}
 	return partsPath + ".0"
@@ -1827,7 +1827,7 @@ func insertAntigravityReasoningReplayItemsWithSchemas(index *antigravityReplayRe
 	// receive no index back and must rebuild their own if they keep using one.
 	for itemIndex, item := range items {
 		hasSuccessor := itemIndex+1 < len(items)
-		itemResult := gjson.ParseBytes(item)
+		itemResult := util.ParseGJSONBytesNoCopy(item)
 		switch strings.TrimSpace(itemResult.Get("type").String()) {
 		case "thought_signature":
 			sig := strings.TrimSpace(itemResult.Get("thoughtSignature").String())
@@ -1839,7 +1839,7 @@ func insertAntigravityReasoningReplayItemsWithSchemas(index *antigravityReplayRe
 				continue
 			}
 			path := partPath + ".thoughtSignature"
-			if antigravityHasNativeThoughtSignature(gjson.GetBytes(out, path).String()) {
+			if antigravityHasNativeThoughtSignature(util.GetGJSONBytesNoCopy(out, path).String()) {
 				continue
 			}
 			ci := int(itemResult.Get("contentIndex").Int())
@@ -1930,7 +1930,7 @@ func antigravityFunctionResponsesCanRestoreID(payload []byte, currentID, nativeN
 // issued for.
 func restoreAntigravityNativeFunctionCallReplay(payload []byte, contentIndex, partIndex int, itemResult gjson.Result, allowLegacyIDRestore, allowSignature bool) ([]byte, bool) {
 	partPath := fmt.Sprintf("request.contents.%d.parts.%d", contentIndex, partIndex)
-	currentCall := gjson.GetBytes(payload, partPath+".functionCall")
+	currentCall := util.GetGJSONBytesNoCopy(payload, partPath+".functionCall")
 	if !currentCall.Exists() {
 		return payload, false
 	}
@@ -1940,7 +1940,7 @@ func restoreAntigravityNativeFunctionCallReplay(payload []byte, contentIndex, pa
 	restoreIdentity := currentID == nativeID || util.IsGeminiClaudeToolUseID(currentID) || allowLegacyIDRestore
 	if !restoreIdentity {
 		signature := strings.TrimSpace(itemResult.Get("thoughtSignature").String())
-		if !allowSignature || signature == "" || antigravityHasNativeThoughtSignature(gjson.GetBytes(payload, partPath+".thoughtSignature").String()) {
+		if !allowSignature || signature == "" || antigravityHasNativeThoughtSignature(util.GetGJSONBytesNoCopy(payload, partPath+".thoughtSignature").String()) {
 			return payload, false
 		}
 		payload = antigravityRemoveThoughtSignatureFromOtherParts(payload, contentIndex, signature, partPath)
@@ -2073,7 +2073,7 @@ func mergeAntigravityFunctionCallPartReplayWithSchemas(index *antigravityReplayR
 	}
 
 	pathSig := partPath + ".thoughtSignature"
-	if sig != "" && !antigravityHasNativeThoughtSignature(gjson.GetBytes(out, pathSig).String()) {
+	if sig != "" && !antigravityHasNativeThoughtSignature(util.GetGJSONBytesNoCopy(out, pathSig).String()) {
 		out = antigravityRemoveThoughtSignatureFromOtherParts(out, ci, sig, partPath)
 		if updated, err := sjson.SetBytes(out, pathSig, sig); err == nil {
 			out = updated
@@ -2081,7 +2081,7 @@ func mergeAntigravityFunctionCallPartReplayWithSchemas(index *antigravityReplayR
 		}
 	}
 	pathFC := partPath + ".functionCall"
-	if !gjson.GetBytes(out, pathFC).Exists() {
+	if !util.GetGJSONBytesNoCopy(out, pathFC).Exists() {
 		fc := map[string]any{"name": name}
 		if callID != "" {
 			fc["id"] = callID
@@ -2137,7 +2137,7 @@ func newAntigravityReasoningReplayAccumulator(scope antigravityReasoningReplaySc
 	items := index.reasoningReplayItemsFromRequest()
 	seenSignatures := make(map[string]bool, len(items))
 	for _, item := range items {
-		itemResult := gjson.ParseBytes(item)
+		itemResult := util.ParseGJSONBytesNoCopy(item)
 		if signature := strings.TrimSpace(itemResult.Get("thoughtSignature").String()); signature != "" {
 			seenSignatures[signature] = true
 		}
@@ -2250,7 +2250,7 @@ func (a *antigravityReasoningReplayAccumulator) attachDetachedSignatureToLastFun
 		return
 	}
 	for itemIndex := len(a.items) - 1; itemIndex >= 0; itemIndex-- {
-		item := gjson.ParseBytes(a.items[itemIndex])
+		item := util.ParseGJSONBytesNoCopy(a.items[itemIndex])
 		if item.Get("type").String() != "function_call_part" {
 			continue
 		}
@@ -2284,10 +2284,10 @@ func (a *antigravityReasoningReplayAccumulator) ObserveSSELine(line []byte) {
 }
 
 func (a *antigravityReasoningReplayAccumulator) observeResponsePayload(payload []byte) {
-	if finishReason := strings.TrimSpace(gjson.GetBytes(payload, "response.candidates.0.finishReason").String()); finishReason != "" {
+	if finishReason := strings.TrimSpace(util.GetGJSONBytesNoCopy(payload, "response.candidates.0.finishReason").String()); finishReason != "" {
 		a.terminal = true
 	}
-	parts := gjson.GetBytes(payload, "response.candidates.0.content.parts")
+	parts := util.GetGJSONBytesNoCopy(payload, "response.candidates.0.content.parts")
 	if !parts.IsArray() {
 		return
 	}

@@ -123,6 +123,86 @@ func TestApplyClaudeHeaders_FastModeBetaIsConditional(t *testing.T) {
 	}
 }
 
+func TestApplyClaudeHeaders_AuthHeaderPolicy(t *testing.T) {
+	t.Run("official api key uses x-api-key only", func(t *testing.T) {
+		auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "official-key"}}
+		req := newClaudeHeaderTestRequest(t, nil)
+		if errApply := applyClaudeHeaders(req, auth, "official-key", false, nil, nil, nil, nil, false); errApply != nil {
+			t.Fatalf("applyClaudeHeaders() error = %v", errApply)
+		}
+		if got := req.Header.Get("x-api-key"); got != "official-key" {
+			t.Fatalf("x-api-key = %q, want official-key", got)
+		}
+		if got := req.Header.Get("Authorization"); got != "" {
+			t.Fatalf("Authorization = %q, want empty", got)
+		}
+	})
+
+	t.Run("custom endpoint api key uses bearer only", func(t *testing.T) {
+		auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "custom-key", "base_url": "https://custom.example.com"}}
+		req := httptest.NewRequest(http.MethodPost, "https://custom.example.com/v1/messages", nil)
+		if errApply := applyClaudeHeaders(req, auth, "custom-key", false, nil, nil, nil, nil, false); errApply != nil {
+			t.Fatalf("applyClaudeHeaders() error = %v", errApply)
+		}
+		if got := req.Header.Get("Authorization"); got != "Bearer custom-key" {
+			t.Fatalf("Authorization = %q, want Bearer custom-key", got)
+		}
+		if got := req.Header.Get("x-api-key"); got != "" {
+			t.Fatalf("x-api-key = %q, want empty", got)
+		}
+	})
+
+	// OpenCode Go's projected Anthropic route may use the canonical protocol
+	// name "claude" and must still send x-api-key instead of Bearer auth.
+	for _, protocol := range []string{"anthropic", "claude"} {
+		t.Run("opencode go "+protocol+" api key uses x-api-key only", func(t *testing.T) {
+			auth := &cliproxyauth.Auth{Attributes: map[string]string{
+				"api_key":      "opencode-key",
+				"base_url":     "https://opencode.ai/zen/go",
+				"provider_key": "opencode-go",
+				"protocol":     protocol,
+			}}
+			req := httptest.NewRequest(http.MethodPost, "https://opencode.ai/zen/go/v1/messages", nil)
+			req.Header.Set("Authorization", "Bearer stale")
+			if errApply := applyClaudeHeaders(req, auth, "opencode-key", false, nil, nil, nil, nil, false); errApply != nil {
+				t.Fatalf("applyClaudeHeaders() error = %v", errApply)
+			}
+			if got := req.Header.Get("x-api-key"); got != "opencode-key" {
+				t.Fatalf("x-api-key = %q, want opencode-key", got)
+			}
+			if got := req.Header.Get("Authorization"); got != "" {
+				t.Fatalf("Authorization = %q, want empty", got)
+			}
+		})
+	}
+
+	t.Run("final dual auth headers are rejected", func(t *testing.T) {
+		auth := &cliproxyauth.Auth{Attributes: map[string]string{
+			"api_key":          "custom-key",
+			"base_url":         "https://custom.example.com",
+			"header:x-api-key": "leaked-key",
+		}}
+		req := httptest.NewRequest(http.MethodPost, "https://custom.example.com/v1/messages", nil)
+		errApply := applyClaudeHeaders(req, auth, "custom-key", false, nil, nil, nil, nil, false)
+		if errApply == nil || !strings.Contains(errApply.Error(), "both Authorization and x-api-key") {
+			t.Fatalf("applyClaudeHeaders() error = %v, want dual header rejection", errApply)
+		}
+	})
+}
+
+func TestClaudeExecutorPrepareRequestRejectsDualAuthHeaders(t *testing.T) {
+	executor := NewClaudeExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"api_key":              "official-key",
+		"header:Authorization": "Bearer leaked",
+	}}
+	req := httptest.NewRequest(http.MethodPost, "https://api.anthropic.com/v1/messages", nil)
+	errPrepare := executor.PrepareRequest(req, auth)
+	if errPrepare == nil || !strings.Contains(errPrepare.Error(), "both Authorization and x-api-key") {
+		t.Fatalf("PrepareRequest() error = %v, want dual header rejection", errPrepare)
+	}
+}
+
 func assertClaudeCredentialIdentity(t *testing.T, body []byte, headers http.Header, deviceIDs []string, accountUUID string) {
 	t.Helper()
 	userID := gjson.GetBytes(body, "metadata.user_id").String()
@@ -4299,7 +4379,169 @@ func TestCheckSystemInstructionsWithSigningMode_LongPromptIsExactAndIdempotent(t
 	}
 }
 
-func TestClaudeExecutor_CustomBaseURLPreservesBodyByDefault(t *testing.T) {
+func TestResolveClaudeKeyConfigMatchesAPIKeyEntry(t *testing.T) {
+	cfg := &config.Config{ClaudeKey: []config.ClaudeKey{{
+		APIKey:                  "parent-key",
+		BaseURL:                 "https://claude.example.com",
+		RebuildMidSystemMessage: true,
+		ExperimentalCCHSigning:  true,
+		Cloak: &config.CloakConfig{
+			Mode: "auto",
+		},
+		APIKeyEntries: []config.ClaudeAPIKeyEntry{{APIKey: "child-key"}},
+	}}}
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"api_key":  "child-key",
+		"base_url": "https://claude.example.com",
+	}}
+
+	entry := resolveClaudeKeyConfig(cfg, auth)
+	if entry == nil {
+		t.Fatal("expected child auth to resolve parent ClaudeKey")
+	}
+	if entry.APIKey != "parent-key" {
+		t.Fatalf("resolved APIKey = %q, want parent-key", entry.APIKey)
+	}
+	if !entry.ExperimentalCCHSigning {
+		t.Fatal("expected child auth to inherit parent ExperimentalCCHSigning")
+	}
+	if !rebuildMidSystemMessageEnabled(cfg, auth) {
+		t.Fatal("expected child auth to inherit parent RebuildMidSystemMessage")
+	}
+	if cloak := resolveClaudeKeyCloakConfig(cfg, auth); cloak == nil || cloak.Mode != "auto" {
+		t.Fatalf("resolved cloak = %#v, want parent cloak", cloak)
+	}
+}
+
+func TestResolveClaudeKeyConfigMatchesAPIKeyEntryBaseURLOverride(t *testing.T) {
+	cfg := &config.Config{ClaudeKey: []config.ClaudeKey{{
+		BaseURL: "https://parent.example.com",
+		APIKeyEntries: []config.ClaudeAPIKeyEntry{{
+			APIKey:  "child-key",
+			BaseURL: "https://child.example.com",
+		}},
+	}}}
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"api_key":  "child-key",
+		"base_url": "https://child.example.com",
+	}}
+
+	if entry := resolveClaudeKeyConfig(cfg, auth); entry == nil {
+		t.Fatal("expected child auth with base-url override to resolve parent ClaudeKey")
+	}
+}
+
+func TestResolveClaudeKeyConfigRejectsConflictingChildBaseURL(t *testing.T) {
+	cfg := &config.Config{ClaudeKey: []config.ClaudeKey{{
+		BaseURL:       "https://claude.example.com",
+		APIKeyEntries: []config.ClaudeAPIKeyEntry{{APIKey: "child-key"}},
+	}}}
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"api_key":  "child-key",
+		"base_url": "https://other.example.com",
+	}}
+
+	if entry := resolveClaudeKeyConfig(cfg, auth); entry != nil {
+		t.Fatalf("resolved entry for conflicting base URL: %#v", entry)
+	}
+}
+
+func TestClaudeExecutor_CustomEndpointHeadersAndFastModeAcrossPaths(t *testing.T) {
+	type seenRequest struct {
+		path          string
+		authorization string
+		xAPIKey       string
+		beta          string
+	}
+	seen := make(chan seenRequest, 3)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, errRead := io.ReadAll(r.Body)
+		if errRead != nil {
+			http.Error(w, errRead.Error(), http.StatusBadRequest)
+			return
+		}
+		seen <- seenRequest{
+			path:          r.URL.Path,
+			authorization: r.Header.Get("Authorization"),
+			xAPIKey:       r.Header.Get("x-api-key"),
+			beta:          r.Header.Get("Anthropic-Beta"),
+		}
+		if r.URL.Path == "/v1/messages/count_tokens" {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"input_tokens":1}`))
+			return
+		}
+		if gjson.GetBytes(body, "stream").Bool() {
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = w.Write([]byte(strings.Join([]string{
+				`event: message_start`,
+				`data: {"type":"message_start","message":{"id":"msg_1","model":"claude-3-5-sonnet-20241022","usage":{"input_tokens":1,"output_tokens":0}}}`,
+				`event: content_block_start`,
+				`data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`,
+				`event: content_block_delta`,
+				`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ok"}}`,
+				`event: content_block_stop`,
+				`data: {"type":"content_block_stop","index":0}`,
+				`event: message_delta`,
+				`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":1}}`,
+				`event: message_stop`,
+				`data: {"type":"message_stop"}`,
+				``,
+			}, "\n")))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"msg_1","type":"message","model":"claude-3-5-sonnet-20241022","role":"assistant","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":1,"output_tokens":1}}`))
+	}))
+	defer server.Close()
+
+	executor := NewClaudeExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"api_key":  "custom-key",
+		"base_url": server.URL,
+	}}
+	req := cliproxyexecutor.Request{
+		Model:   "claude-3-5-sonnet-20241022",
+		Payload: []byte(`{"speed":"fast","messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`),
+	}
+	opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("claude")}
+
+	if _, errExecute := executor.Execute(context.Background(), auth, req, opts); errExecute != nil {
+		t.Fatalf("Execute() error = %v", errExecute)
+	}
+	streamResult, errStream := executor.ExecuteStream(context.Background(), auth, req, opts)
+	if errStream != nil {
+		t.Fatalf("ExecuteStream() error = %v", errStream)
+	}
+	for chunk := range streamResult.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("stream chunk error = %v", chunk.Err)
+		}
+	}
+	if _, errTokens := executor.countTokensUpstream(context.Background(), auth, req, opts); errTokens != nil {
+		t.Fatalf("countTokensUpstream() error = %v", errTokens)
+	}
+
+	for i := 0; i < 3; i++ {
+		got := <-seen
+		if got.authorization != "Bearer custom-key" {
+			t.Fatalf("%s Authorization = %q, want Bearer custom-key", got.path, got.authorization)
+		}
+		if got.xAPIKey != "" {
+			t.Fatalf("%s x-api-key = %q, want empty", got.path, got.xAPIKey)
+		}
+		if got.path == "/v1/messages/count_tokens" {
+			// Upstream removed fast mode beta from count_tokens path;
+			// it only carries token-counting-2024-11-01 now.
+			continue
+		}
+		if !strings.Contains(got.beta, claudeFastModeBeta) {
+			t.Fatalf("%s Anthropic-Beta = %q, want fast beta", got.path, got.beta)
+		}
+	}
+}
+
+func TestClaudeExecutor_CustomBaseURLOmitsCCHByDefault(t *testing.T) {
 	var seenBody []byte
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)

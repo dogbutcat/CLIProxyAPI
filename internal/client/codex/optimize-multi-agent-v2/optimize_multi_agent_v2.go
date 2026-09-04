@@ -15,6 +15,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/home"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/oagmsg"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -89,7 +90,7 @@ func TranslateRequestWithCodexMultiAgentV2(ctx context.Context, headers http.Hea
 			payload = RewriteCodexMultiAgentV2Input(ctx, headers, payload, cfg)
 		}
 	}
-	return sdktranslator.TranslateRequest(from, to, model, payload, stream)
+	return oagmsg.TranslateRequest(from, to, model, payload, stream)
 }
 
 // PrepareCodexMultiAgentV2Tools prepares collaboration tool definitions at the

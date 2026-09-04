@@ -17,6 +17,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/oagmsg"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -32,13 +33,19 @@ const (
 
 var dataTag = []byte("data:")
 
-func translateCodexRequestPair(from, to sdktranslator.Format, model string, originalPayload, payload []byte, stream bool, preserveEmptyThinkingBlocks ...bool) ([]byte, []byte) {
-	isCompat := len(preserveEmptyThinkingBlocks) > 0 && preserveEmptyThinkingBlocks[0]
+var translateCodexRequest = func(from, to sdktranslator.Format, model string, payload []byte, stream bool) []byte {
+	return oagmsg.TranslateRequest(from, to, model, payload, stream)
+}
+
+func translateCodexRequestPair(from, to sdktranslator.Format, model string, originalPayload, payload []byte, stream bool, preserveThinkingBlocks ...bool) ([]byte, []byte) {
+	isCompat := len(preserveThinkingBlocks) > 0 && preserveThinkingBlocks[0]
 	translate := func(raw []byte) []byte {
-		if isCompat && from == sdktranslator.FormatClaude && to == sdktranslator.FormatCodex {
-			return helps.TranslateRequestWithAPIKeyModelCompatibility(context.Background(), nil, nil, from, to, model, raw, stream, true)
+		if isCompat {
+			return oagmsg.TranslateRequestWithOptions(from, to, model, raw, stream, oagmsg.RequestTranslationOptions{
+				PreserveThinkingBlocks: true,
+			})
 		}
-		return sdktranslator.TranslateRequest(from, to, model, raw, stream)
+		return translateCodexRequest(from, to, model, raw, stream)
 	}
 	if bytes.Equal(originalPayload, payload) {
 		body := translate(payload)
@@ -370,11 +377,15 @@ func applyCodexHeadersFromSources(r *http.Request, auth *cliproxyauth.Auth, toke
 }
 
 func applyCodexCloakingHeaders(headers http.Header, cfg *config.Config) {
-	if headers == nil || cfg == nil || cfg.Codex.DisableCodexCloaking {
+	if headers == nil || codexCloakingDisabled(cfg) {
 		return
 	}
 	headers.Set("User-Agent", codexUserAgent)
 	headers.Set("Originator", codexOriginator)
+}
+
+func codexCloakingDisabled(cfg *config.Config) bool {
+	return cfg != nil && cfg.Codex.DisableCodexCloaking
 }
 
 func normalizeCodexInstructions(body []byte) []byte {

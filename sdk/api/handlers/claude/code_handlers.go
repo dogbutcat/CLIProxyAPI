@@ -400,6 +400,16 @@ func (h *ClaudeCodeAPIHandler) WriteErrorResponse(c *gin.Context, msg *interface
 		}
 	}
 
+	if body, ok := upstreamClaudeErrorEnvelope(msg); ok {
+		appendClaudeAPIResponse(c, body)
+		if !c.Writer.Written() {
+			c.Writer.Header().Set("Content-Type", "application/json")
+		}
+		c.Status(status)
+		_, _ = c.Writer.Write(body)
+		return
+	}
+
 	body, err := json.Marshal(h.toClaudeError(msg))
 	if err != nil {
 		body = []byte(`{"type":"error","error":{"type":"api_error","message":"Internal Server Error"}}`)
@@ -410,6 +420,34 @@ func (h *ClaudeCodeAPIHandler) WriteErrorResponse(c *gin.Context, msg *interface
 	}
 	c.Status(status)
 	_, _ = c.Writer.Write(body)
+}
+
+func upstreamClaudeErrorEnvelope(msg *interfaces.ErrorMessage) ([]byte, bool) {
+	if msg == nil || msg.Error == nil {
+		return nil, false
+	}
+	body := []byte(strings.TrimSpace(msg.Error.Error()))
+	if !json.Valid(body) {
+		return nil, false
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return nil, false
+	}
+	if t, ok := payload["type"].(string); !ok || strings.TrimSpace(t) != "error" {
+		return nil, false
+	}
+	errValue, ok := payload["error"].(map[string]any)
+	if !ok {
+		return nil, false
+	}
+	if t, ok := errValue["type"].(string); !ok || strings.TrimSpace(t) == "" {
+		return nil, false
+	}
+	if m, ok := errValue["message"].(string); !ok || strings.TrimSpace(m) == "" {
+		return nil, false
+	}
+	return bytes.Clone(body), true
 }
 
 func claudeErrorDetailFromText(status int, errText string) (string, string) {

@@ -11,8 +11,11 @@ import (
 )
 
 type fakeKimiThinkingReplayKVClient struct {
-	mu     sync.Mutex
-	values map[string][]byte
+	mu            sync.Mutex
+	values        map[string][]byte
+	lastSetTTL    time.Duration
+	lastCASTTL    time.Duration
+	lastExpireTTL time.Duration
 }
 
 func newFakeKimiThinkingReplayKVClient() *fakeKimiThinkingReplayKVClient {
@@ -26,9 +29,10 @@ func (c *fakeKimiThinkingReplayKVClient) KVGet(_ context.Context, key string) ([
 	return append([]byte(nil), value...), found, nil
 }
 
-func (c *fakeKimiThinkingReplayKVClient) KVSet(_ context.Context, key string, value []byte, _ homekv.KVSetOptions) (bool, error) {
+func (c *fakeKimiThinkingReplayKVClient) KVSet(_ context.Context, key string, value []byte, opts homekv.KVSetOptions) (bool, error) {
 	c.mu.Lock()
 	c.values[key] = append([]byte(nil), value...)
+	c.lastSetTTL = opts.EX
 	c.mu.Unlock()
 	return true, nil
 }
@@ -46,7 +50,7 @@ func (c *fakeKimiThinkingReplayKVClient) KVDel(_ context.Context, keys ...string
 	return deleted, nil
 }
 
-func (c *fakeKimiThinkingReplayKVClient) KVCompareAndSwap(_ context.Context, key string, expected []byte, expectedExists bool, value []byte, _ time.Duration) (bool, error) {
+func (c *fakeKimiThinkingReplayKVClient) KVCompareAndSwap(_ context.Context, key string, expected []byte, expectedExists bool, value []byte, ttl time.Duration) (bool, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	current, found := c.values[key]
@@ -54,12 +58,14 @@ func (c *fakeKimiThinkingReplayKVClient) KVCompareAndSwap(_ context.Context, key
 		return false, nil
 	}
 	c.values[key] = append([]byte(nil), value...)
+	c.lastCASTTL = ttl
 	return true, nil
 }
 
-func (c *fakeKimiThinkingReplayKVClient) KVExpire(_ context.Context, key string, _ time.Duration) (bool, error) {
+func (c *fakeKimiThinkingReplayKVClient) KVExpire(_ context.Context, key string, ttl time.Duration) (bool, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.lastExpireTTL = ttl
 	_, found := c.values[key]
 	return found, nil
 }
@@ -164,6 +170,51 @@ func TestKimiThinkingReplayTombstoneFencesConcurrentMiss(t *testing.T) {
 	}
 }
 
+func TestKimiThinkingReplayExpiredLocalReadFencesStaleWriter(t *testing.T) {
+	ClearKimiThinkingReplayCache()
+	t.Cleanup(ClearKimiThinkingReplayCache)
+
+	const modelFamily = "k3"
+	const sessionKey = "execution:ttl-fence"
+	oldContent := []byte(`[{"type":"thinking","signature":"old"}]`)
+	if !CacheKimiThinkingReplayBestEffort(context.Background(), modelFamily, sessionKey, oldContent) {
+		t.Fatal("failed to seed old content")
+	}
+	_, oldSnapshot, found, errGet := GetKimiThinkingReplayWithSnapshotRequired(context.Background(), modelFamily, sessionKey)
+	if errGet != nil || !found {
+		t.Fatalf("initial cache read = found %v, error %v", found, errGet)
+	}
+
+	key := kimiThinkingReplayCacheKey(modelFamily, sessionKey)
+	kimiThinkingReplayMu.Lock()
+	entry := kimiThinkingReplayEntries[key]
+	entry.Timestamp = time.Now().Add(-KimiThinkingReplayCacheTTL - time.Second)
+	kimiThinkingReplayEntries[key] = entry
+	kimiThinkingReplayMu.Unlock()
+
+	_, freshSnapshot, freshFound, errFresh := GetKimiThinkingReplayWithSnapshotRequired(context.Background(), modelFamily, sessionKey)
+	if errFresh != nil || freshFound {
+		t.Fatalf("expired cache read = found %v, error %v; want fenced miss", freshFound, errFresh)
+	}
+	staleContent := []byte(`[{"type":"thinking","signature":"stale"}]`)
+	replaced, errReplace := ReplaceKimiThinkingReplayIfUnchanged(context.Background(), modelFamily, sessionKey, oldSnapshot, staleContent)
+	if errReplace != nil {
+		t.Fatalf("stale replace error = %v", errReplace)
+	}
+	if replaced {
+		t.Fatal("stale pre-expiry snapshot replaced fenced miss")
+	}
+	newContent := []byte(`[{"type":"thinking","signature":"new"}]`)
+	replaced, errReplace = ReplaceKimiThinkingReplayIfUnchanged(context.Background(), modelFamily, sessionKey, freshSnapshot, newContent)
+	if errReplace != nil || !replaced {
+		t.Fatalf("fresh fenced replace = %v, error %v", replaced, errReplace)
+	}
+	got, found, errGet := GetKimiThinkingReplayRequired(context.Background(), modelFamily, sessionKey)
+	if errGet != nil || !found || !bytes.Equal(got, newContent) {
+		t.Fatalf("cached content = %s, found %v, error %v; want fresh content", got, found, errGet)
+	}
+}
+
 func TestKimiThinkingReplayHomeGenerationPreventsABADelete(t *testing.T) {
 	client := newFakeKimiThinkingReplayKVClient()
 	useFakeKimiThinkingReplayKVClient(t, client)
@@ -193,6 +244,30 @@ func TestKimiThinkingReplayHomeGenerationPreventsABADelete(t *testing.T) {
 	got, found, errGet := GetKimiThinkingReplayRequired(context.Background(), modelFamily, sessionKey)
 	if errGet != nil || !found || !bytes.Equal(got, contentA) {
 		t.Fatalf("Home cached content = %s, found %v, error %v; want latest A", got, found, errGet)
+	}
+}
+
+func TestKimiThinkingReplayHomeMissReservesAndReplacesWithTTL(t *testing.T) {
+	client := newFakeKimiThinkingReplayKVClient()
+	useFakeKimiThinkingReplayKVClient(t, client)
+
+	const modelFamily = "k3"
+	const sessionKey = "execution:home-miss"
+	_, snapshot, found, errGet := GetKimiThinkingReplayWithSnapshotRequired(context.Background(), modelFamily, sessionKey)
+	if errGet != nil || found {
+		t.Fatalf("Home missing read = found %v, error %v; want fenced miss", found, errGet)
+	}
+	if client.lastCASTTL != KimiThinkingReplayCacheTTL || client.lastExpireTTL != KimiThinkingReplayCacheTTL {
+		t.Fatalf("Home miss TTLs = CAS %v expire %v, want %v", client.lastCASTTL, client.lastExpireTTL, KimiThinkingReplayCacheTTL)
+	}
+	content := []byte(`[{"type":"thinking","signature":"new"}]`)
+	replaced, errReplace := ReplaceKimiThinkingReplayIfUnchanged(context.Background(), modelFamily, sessionKey, snapshot, content)
+	if errReplace != nil || !replaced {
+		t.Fatalf("Home replace = %v, error %v", replaced, errReplace)
+	}
+	got, found, errGet := GetKimiThinkingReplayRequired(context.Background(), modelFamily, sessionKey)
+	if errGet != nil || !found || !bytes.Equal(got, content) {
+		t.Fatalf("Home cached content = %s, found %v, error %v; want replaced content", got, found, errGet)
 	}
 }
 
@@ -233,5 +308,26 @@ func TestKimiThinkingReplayRejectsOversizedContent(t *testing.T) {
 	content[len(content)-1] = ']'
 	if CacheKimiThinkingReplayBestEffort(context.Background(), "k3", "execution:oversized", content) {
 		t.Fatal("oversized content was cached")
+	}
+}
+
+func TestKimiThinkingReplayRejectsInvalidContentBlocks(t *testing.T) {
+	ClearKimiThinkingReplayCache()
+	t.Cleanup(ClearKimiThinkingReplayCache)
+
+	cases := map[string][]byte{
+		"scalar-array": []byte(`[1]`),
+		"missing-type": []byte(`[{"thinking":"reasoning","signature":"sig"}]`),
+		"empty-type":   []byte(`[{"type":"  ","signature":"sig"}]`),
+	}
+	for name, content := range cases {
+		t.Run(name, func(t *testing.T) {
+			if CacheKimiThinkingReplayBestEffort(context.Background(), "k3", "execution:"+name, content) {
+				t.Fatalf("%s content was cached", name)
+			}
+			if got, found, errGet := GetKimiThinkingReplayRequired(context.Background(), "k3", "execution:"+name); errGet != nil || found || got != nil {
+				t.Fatalf("%s cache read = %s, found %v, error %v; want miss", name, got, found, errGet)
+			}
+		})
 	}
 }
