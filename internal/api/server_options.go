@@ -6,27 +6,32 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	managementHandlers "github.com/router-for-me/CLIProxyAPI/v7/internal/api/handlers/management"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/pluginhost"
+	usagebridge "github.com/router-for-me/CLIProxyAPI/v7/internal/usage"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 )
 
 type serverOptionConfig struct {
-	extraMiddleware       []gin.HandlerFunc
-	engineConfigurator    func(*gin.Engine)
-	routerConfigurator    func(*gin.Engine, *handlers.BaseAPIHandler, *config.Config)
-	requestLoggerFactory  func(*config.Config, string) logging.RequestLogger
-	localPassword         string
-	keepAliveEnabled      bool
-	keepAliveTimeout      time.Duration
-	keepAliveOnTimeout    func()
-	postAuthHook          auth.PostAuthHook
-	postAuthPersistHook   auth.PostAuthHook
-	pluginHost            *pluginhost.Host
-	configReloadHook      func(context.Context, *config.Config)
-	exampleAPIKeySafeMode bool
+	extraMiddleware           []gin.HandlerFunc
+	engineConfigurator        func(*gin.Engine)
+	routerConfigurator        func(*gin.Engine, *handlers.BaseAPIHandler, *config.Config)
+	requestLoggerFactory      func(*config.Config, string) logging.RequestLogger
+	localPassword             string
+	keepAliveEnabled          bool
+	keepAliveTimeout          time.Duration
+	keepAliveOnTimeout        func()
+	postAuthHook              auth.PostAuthHook
+	postAuthPersistHook       auth.PostAuthHook
+	pluginHost                *pluginhost.Host
+	configReloadHook          func(context.Context, *config.Config)
+	openCodeGoQuotaRuntime    managementHandlers.OpenCodeGoQuotaRuntime
+	openCodeGoReferralRuntime managementHandlers.OpenCodeGoReferralRuntime
+	usageBridge               *usagebridge.Bridge
+	exampleAPIKeySafeMode     bool
 }
 
 // ServerOption customises HTTP server construction.
@@ -125,6 +130,27 @@ func WithPluginHost(host *pluginhost.Host) ServerOption {
 func WithConfigReloadHook(hook func(context.Context, *config.Config)) ServerOption {
 	return func(cfg *serverOptionConfig) {
 		cfg.configReloadHook = hook
+	}
+}
+
+// WithOpenCodeGoQuotaRuntime injects the provider-owned quota runtime into Management APIs.
+func WithOpenCodeGoQuotaRuntime(runtime managementHandlers.OpenCodeGoQuotaRuntime) ServerOption {
+	return func(cfg *serverOptionConfig) {
+		cfg.openCodeGoQuotaRuntime = runtime
+	}
+}
+
+// WithOpenCodeGoReferralRuntime injects the provider-owned referral runtime into Management APIs.
+func WithOpenCodeGoReferralRuntime(runtime managementHandlers.OpenCodeGoReferralRuntime) ServerOption {
+	return func(cfg *serverOptionConfig) {
+		cfg.openCodeGoReferralRuntime = runtime
+	}
+}
+
+// WithUsageBridge stores the local usage bridge for management consumers.
+func WithUsageBridge(bridge *usagebridge.Bridge) ServerOption {
+	return func(cfg *serverOptionConfig) {
+		cfg.usageBridge = bridge
 	}
 }
 

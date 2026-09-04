@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/constant"
@@ -13,7 +14,7 @@ import (
 )
 
 // ConfigSynthesizer generates Auth entries from configuration API keys.
-// It handles Gemini, Interactions, Claude, Codex, xAI, OpenAI-compat, and Vertex-compat providers.
+// It handles Gemini, Interactions, Claude, Codex, xAI, OpenAI-compat, Vertex-compat, and OpenCode Go providers.
 type ConfigSynthesizer struct{}
 
 // NewConfigSynthesizer creates a new ConfigSynthesizer instance.
@@ -56,6 +57,8 @@ func (s *ConfigSynthesizer) Synthesize(ctx *SynthesisContext) ([]*coreauth.Auth,
 	out = append(out, s.synthesizeOpenAICompat(ctx)...)
 	// Vertex-compat
 	out = append(out, s.synthesizeVertexCompat(ctx)...)
+	// OpenCode Go
+	out = append(out, s.synthesizeOpenCodeGo(ctx)...)
 
 	return out, nil
 }
@@ -132,6 +135,7 @@ func (s *ConfigSynthesizer) synthesizeGeminiKeyEntries(ctx *SynthesisContext, en
 }
 
 // synthesizeClaudeKeys creates Auth entries for Claude API keys.
+// It supports both legacy single api-key and api-key-entries child keys.
 func (s *ConfigSynthesizer) synthesizeClaudeKeys(ctx *SynthesisContext) []*coreauth.Auth {
 	cfg := ctx.Config
 	now := ctx.Now
@@ -140,63 +144,104 @@ func (s *ConfigSynthesizer) synthesizeClaudeKeys(ctx *SynthesisContext) []*corea
 	out := make([]*coreauth.Auth, 0, len(cfg.ClaudeKey))
 	for i := range cfg.ClaudeKey {
 		ck := cfg.ClaudeKey[i]
-		key := strings.TrimSpace(ck.APIKey)
-		base := strings.TrimSpace(ck.BaseURL)
-		if key == "" && base == "" {
+		if ck.Disabled {
 			continue
 		}
 		prefix := strings.TrimSpace(ck.Prefix)
-		proxyURL := strings.TrimSpace(ck.ProxyURL)
-		id, token := idGen.Next("claude:apikey", key, base, proxyURL, prefix, config.FormatSortedHeaders(ck.Headers))
-		attrs := map[string]string{
-			"source":       fmt.Sprintf("config:claude[%s]", token),
-			"config_index": strconv.Itoa(i),
+		base := strings.TrimSpace(ck.BaseURL)
+		parentProxy := strings.TrimSpace(ck.ProxyURL)
+		parentName := strings.TrimSpace(ck.Name)
+		modelsHash := diff.ComputeClaudeModelsHash(ck.Models)
+
+		if key := strings.TrimSpace(ck.APIKey); key != "" || base != "" {
+			idParts := []string{key, base, parentProxy, prefix, config.FormatSortedHeaders(ck.Headers)}
+			out = append(out, s.synthesizeClaudeKeyAuth(ctx, ck, key, parentProxy, parentName, prefix, base, modelsHash, ck.Weight, strconv.Itoa(i), idParts, now, idGen))
 		}
-		if key != "" {
-			attrs["api_key"] = key
+
+		for j := range ck.APIKeyEntries {
+			entry := ck.APIKeyEntries[j]
+			if entry.Disabled {
+				continue
+			}
+			key := strings.TrimSpace(entry.APIKey)
+			childBase := strings.TrimSpace(entry.BaseURL)
+			if childBase == "" {
+				childBase = base
+			}
+			if key == "" && childBase == "" {
+				continue
+			}
+			proxyURL := strings.TrimSpace(entry.ProxyURL)
+			if proxyURL == "" {
+				proxyURL = parentProxy
+			}
+			displayName := strings.TrimSpace(entry.Name)
+			if displayName == "" {
+				displayName = parentName
+			}
+			weight := ck.Weight
+			if entry.Weight != nil {
+				weight = entry.Weight
+			}
+			idParts := []string{key, childBase, proxyURL, prefix, config.FormatSortedHeaders(ck.Headers)}
+			out = append(out, s.synthesizeClaudeKeyAuth(ctx, ck, key, proxyURL, displayName, prefix, childBase, modelsHash, weight, strconv.Itoa(i), idParts, now, idGen))
 		}
-		metadata := map[string]any{}
-		if ck.DisableCooling != nil {
-			metadata["disable_cooling"] = *ck.DisableCooling
-		}
-		addRequestRetryToMetadata(ck.RequestRetry, metadata)
-		addRequestScopedErrorsToMetadata(ck.RequestScopedErrors, metadata)
-		if ck.Priority != 0 {
-			attrs["priority"] = strconv.Itoa(ck.Priority)
-		}
-		addWeightToAttrs(ck.Weight, attrs)
-		if base != "" {
-			attrs["base_url"] = base
-		}
-		if ck.RebuildMidSystemMessage {
-			attrs["rebuild_mid_system_message"] = "true"
-		}
-		if profile := strings.ToLower(strings.TrimSpace(ck.FingerprintProfile)); profile != "" {
-			attrs["fingerprint_profile"] = profile
-		}
-		if hash := diff.ComputeClaudeModelsHash(ck.Models); hash != "" {
-			attrs["models_hash"] = hash
-		}
-		addConfigHeadersToAttrs(ck.Headers, attrs)
-		a := &coreauth.Auth{
-			ID:         id,
-			Provider:   "claude",
-			Label:      "claude-apikey",
-			Prefix:     prefix,
-			Status:     coreauth.StatusActive,
-			ProxyURL:   proxyURL,
-			Attributes: attrs,
-			Metadata:   metadata,
-			CreatedAt:  now,
-			UpdatedAt:  now,
-		}
-		ApplyAuthExcludedModelsMeta(a, cfg, ck.ExcludedModels, "apikey")
-		if len(a.Metadata) == 0 {
-			a.Metadata = nil
-		}
-		out = append(out, a)
 	}
 	return out
+}
+
+func (s *ConfigSynthesizer) synthesizeClaudeKeyAuth(ctx *SynthesisContext, ck config.ClaudeKey, key, proxyURL, displayName, prefix, base, modelsHash string, weight *int, configIndex string, idParts []string, now time.Time, idGen *StableIDGenerator) *coreauth.Auth {
+	id, token := idGen.Next("claude:apikey", idParts...)
+	attrs := map[string]string{
+		"source":       fmt.Sprintf("config:claude[%s]", token),
+		"config_index": configIndex,
+	}
+	if key != "" {
+		attrs["api_key"] = key
+	}
+	metadata := map[string]any{}
+	if displayName != "" {
+		attrs["display_name"] = displayName
+	}
+	if ck.DisableCooling != nil {
+		metadata["disable_cooling"] = *ck.DisableCooling
+	}
+	addRequestRetryToMetadata(ck.RequestRetry, metadata)
+	addRequestScopedErrorsToMetadata(ck.RequestScopedErrors, metadata)
+	if ck.Priority != 0 {
+		attrs["priority"] = strconv.Itoa(ck.Priority)
+	}
+	addWeightToAttrs(weight, attrs)
+	if base != "" {
+		attrs["base_url"] = base
+	}
+	if ck.RebuildMidSystemMessage {
+		attrs["rebuild_mid_system_message"] = "true"
+	}
+	if profile := strings.ToLower(strings.TrimSpace(ck.FingerprintProfile)); profile != "" {
+		attrs["fingerprint_profile"] = profile
+	}
+	if modelsHash != "" {
+		attrs["models_hash"] = modelsHash
+	}
+	addConfigHeadersToAttrs(ck.Headers, attrs)
+	a := &coreauth.Auth{
+		ID:         id,
+		Provider:   "claude",
+		Label:      "claude-apikey",
+		Prefix:     prefix,
+		Status:     coreauth.StatusActive,
+		ProxyURL:   proxyURL,
+		Attributes: attrs,
+		Metadata:   metadata,
+		CreatedAt:  now,
+		UpdatedAt:  now,
+	}
+	ApplyAuthExcludedModelsMeta(a, ctx.Config, ck.ExcludedModels, "apikey")
+	if len(a.Metadata) == 0 {
+		a.Metadata = nil
+	}
+	return a
 }
 
 // synthesizeCodexKeys creates Auth entries for Codex API keys.
@@ -318,6 +363,9 @@ func (s *ConfigSynthesizer) synthesizeOpenAICompat(ctx *SynthesisContext) []*cor
 			}
 			addRequestRetryToMetadata(compat.RequestRetry, metadata)
 			addRequestScopedErrorsToMetadata(compat.RequestScopedErrors, metadata)
+			if compat.SupportPromptCacheKey {
+				metadata["support_prompt_cache_key"] = true
+			}
 			if compat.Priority != 0 {
 				attrs["priority"] = strconv.Itoa(compat.Priority)
 			}
@@ -364,6 +412,9 @@ func (s *ConfigSynthesizer) synthesizeOpenAICompat(ctx *SynthesisContext) []*cor
 			}
 			addRequestRetryToMetadata(compat.RequestRetry, metadata)
 			addRequestScopedErrorsToMetadata(compat.RequestScopedErrors, metadata)
+			if compat.SupportPromptCacheKey {
+				metadata["support_prompt_cache_key"] = true
+			}
 			if compat.Priority != 0 {
 				attrs["priority"] = strconv.Itoa(compat.Priority)
 			}

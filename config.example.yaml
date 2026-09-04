@@ -125,6 +125,16 @@ error-logs-max-files: 10
 # When false, disable in-memory usage statistics aggregation
 usage-statistics-enabled: false
 
+# Resumable Management API usage import sessions.
+# These values are read when the usage bridge/import-session manager starts; restart the service
+# after changing them. Leave dir empty to store sessions next to the usage database.
+usage-import-session:
+  dir: ""
+  chunk-size-bytes: 4194304
+  max-session-bytes: 17179869184
+  max-active: 2
+  ttl-minutes: 1440
+
 # How long (in seconds) usage queue items are retained in memory for the Management API.
 # The local Redis RESP usage output is disabled.
 # Default: 60. Max: 3600.
@@ -214,7 +224,7 @@ quota-exceeded:
 
 # Routing strategy for selecting credentials when multiple match.
 routing:
-  strategy: "round-robin" # round-robin (default), weighted-round-robin, fill-first
+  strategy: "round-robin" # round-robin (default), weighted-round-robin, fill-first, seq-random
   # weighted-round-robin uses each credential's integer weight (default 1, maximum 1,000,000).
   # Non-positive weights exclude the credential while this strategy is active.
   # For OAuth/file credentials, add a top-level numeric "weight" field to the auth JSON.
@@ -237,6 +247,40 @@ routing:
   # Ignored when routing.session-affinity is false.
   session-affinity-subagents: true
 
+# OpenCode Go provider config.
+# opencode-go:
+#   quota:
+#     # How often the quota poller checks remaining quota. Go duration format.
+#     poll-interval: "5m"
+#     # Mark a credential exhausted when percentRemaining is at or below this value.
+#     threshold: 0
+#   key-groups:
+#     - name-prefix: "opencode-go"
+#       disable-cooling: false
+#       headers:
+#         X-Custom-Header: "custom-value"
+#       openai:
+#         name-suffix: "openai"
+#         base-url: "https://api.opencode.ai/v1"
+#         prefix: "go"
+#         priority: 0
+#         models:
+#           - "gpt-5.1"
+#           - name: "gpt-5.1-codex"
+#             alias: "go-codex"
+#       anthropic:
+#         name-suffix: "claude"
+#         base-url: "https://api.opencode.ai"
+#         models:
+#           - name: "claude-sonnet-4-5"
+#             alias: "go-sonnet"
+#       keys:
+#         - key-name: "account-1"
+#           api-key: "ocg_..."
+#           workspace-id: "workspace-id"
+#           auth-cookie: "session=..."
+#           proxy-url: "socks5://proxy.example.com:1080"
+
 # Codex provider behavior.
 codex:
   # When true, and routing.strategy is fill-first or routing.session-affinity is true,
@@ -244,7 +288,8 @@ codex:
   # Some superstitious users believe request tracking identifiers can be used
   # as evidence for TOS enforcement bans; this option only satisfies those odd concerns.
   identity-confuse: false
-  # Disable forcing the official Codex User-Agent and Originator headers on HTTP/SSE and WebSocket requests.
+  # Disable the final official User-Agent/Originator override on HTTP/SSE and WebSocket requests.
+  # Custom credential headers still apply before this policy.
   disable-codex-cloaking: false
   # Hold back the initial handshake events (response.created, response.in_progress and the
   # websocket metadata frames) until the upstream emits its first generated event.

@@ -42,6 +42,21 @@ func (s *blockingServiceCooldownStore) Save(ctx context.Context, _ []coreauth.Co
 	return ctx.Err()
 }
 
+type stoppingServiceSelector struct {
+	stopped atomic.Bool
+}
+
+func (s *stoppingServiceSelector) Pick(_ context.Context, _ string, _ string, _ cliproxyexecutor.Options, auths []*coreauth.Auth) (*coreauth.Auth, error) {
+	if len(auths) == 0 {
+		return nil, &coreauth.Error{Code: "auth_not_found", Message: "no auth available"}
+	}
+	return auths[0], nil
+}
+
+func (s *stoppingServiceSelector) Stop() {
+	s.stopped.Store(true)
+}
+
 func TestConfigCommitDoesNotHoldCommitMutexDuringCooldownPersistence(t *testing.T) {
 	manager := coreauth.NewManager(nil, nil, nil)
 	auth := &coreauth.Auth{ID: "auth-1", Provider: "xai", Status: coreauth.StatusActive}
@@ -86,6 +101,68 @@ func TestConfigCommitDoesNotHoldCommitMutexDuringCooldownPersistence(t *testing.
 		}
 	case <-time.After(time.Second):
 		t.Fatal("config runtime apply did not honor cooldown persistence cancellation")
+	}
+}
+
+func TestServiceApplyConfigRuntimeDoesNotReplaceSelectorOnCanceledManagerApply(t *testing.T) {
+	manager := coreauth.NewManager(nil, &coreauth.RoundRobinSelector{}, nil)
+	store := &blockingServiceCooldownStore{started: make(chan struct{})}
+	manager.SetCooldownStateStore(store)
+	service := &Service{cfg: &config.Config{}, coreManager: manager}
+	initialSelector := manager.Selector()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	commit := service.commitConfigUpdate(&config.Config{
+		AuthDir:            t.TempDir(),
+		SaveCooldownStatus: true,
+		Routing: internalconfig.RoutingConfig{
+			Strategy: "fill-first",
+		},
+	})
+	applyDone := make(chan bool, 1)
+	go func() {
+		applyDone <- service.applyConfigRuntime(ctx, commit, false)
+	}()
+	select {
+	case <-store.started:
+	case <-time.After(time.Second):
+		t.Fatal("old cooldown store persistence did not start")
+	}
+	cancel()
+	select {
+	case applied := <-applyDone:
+		if applied {
+			t.Fatal("canceled runtime apply succeeded")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("canceled runtime apply did not exit")
+	}
+	if got := manager.Selector(); got != initialSelector {
+		t.Fatalf("selector changed after canceled apply: got %T %p, want %T %p", got, got, initialSelector, initialSelector)
+	}
+	if service.appliedRoutingState != nil {
+		t.Fatalf("applied routing state changed after canceled apply: %+v", *service.appliedRoutingState)
+	}
+}
+
+func TestServiceApplyConfigRuntimeStopsReplacedSelector(t *testing.T) {
+	selector := &stoppingServiceSelector{}
+	manager := coreauth.NewManager(nil, selector, nil)
+	service := &Service{cfg: &config.Config{}, coreManager: manager}
+
+	commit := service.commitConfigUpdate(&config.Config{
+		Routing: internalconfig.RoutingConfig{
+			Strategy: "fill-first",
+		},
+	})
+	if !service.applyConfigRuntime(context.Background(), commit, false) {
+		t.Fatal("config runtime apply failed")
+	}
+	if !selector.stopped.Load() {
+		t.Fatal("replaced selector was not stopped")
+	}
+	if _, ok := manager.Selector().(*coreauth.FillFirstSelector); !ok {
+		t.Fatalf("selector = %T, want *FillFirstSelector", manager.Selector())
 	}
 }
 

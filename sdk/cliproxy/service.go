@@ -125,4 +125,6 @@ type Service struct {
 	homePluginSyncFetch          func(context.Context, sdkpluginstore.PluginSyncRequest) (sdkpluginstore.PluginSyncResponse, error)
 	homePluginDeleteTask         func(context.Context, *config.Config, home.PluginTask) homeplugins.SyncReport
 	antigravityProbeWg           sync.WaitGroup
+	usageRuntime                 serviceUsageRuntime
+	openCodeRuntime              serviceOpenCodeRuntime
 }

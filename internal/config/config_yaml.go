@@ -49,6 +49,7 @@ func SaveConfigPreserveComments(configFile string, cfg *Config) error {
 	// Remove deprecated sections before merging back the sanitized config.
 	removeLegacyAuthBlock(original.Content[0])
 	removeLegacyOpenAICompatAPIKeys(original.Content[0])
+	removeLegacyOpenCodeGoKeys(original.Content[0])
 	removeRemovedIntegrationKeys(original.Content[0])
 	removeLegacyGenerativeLanguageKeys(original.Content[0])
 
@@ -811,6 +812,23 @@ func removeLegacyGenerativeLanguageKeys(root *yaml.Node) {
 		return
 	}
 	removeMapKey(root, "generative-language-api-key")
+}
+
+func removeLegacyOpenCodeGoKeys(root *yaml.Node) {
+	if root == nil || root.Kind != yaml.MappingNode {
+		return
+	}
+	removeMapKey(root, "key-groups")
+	idx := findMapKeyIndex(root, "routing")
+	if idx < 0 || idx+1 >= len(root.Content) {
+		return
+	}
+	routing := root.Content[idx+1]
+	if routing == nil || routing.Kind != yaml.MappingNode {
+		return
+	}
+	removeMapKey(routing, "opencode-go-poll-interval")
+	removeMapKey(routing, "opencode-go-poll-threshold")
 }
 
 func removeLegacyAuthBlock(root *yaml.Node) {
