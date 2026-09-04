@@ -1,6 +1,7 @@
 package util
 
 import (
+	"bytes"
 	"testing"
 	"unsafe"
 )
@@ -23,7 +24,13 @@ func TestParseGJSONBytesNoCopy(t *testing.T) {
 	input := []byte(`{"request":{"contents":[{"role":"user"}]}}`)
 	root := ParseGJSONBytesNoCopy(input)
 	if !root.IsObject() || root.Get("request.contents.0.role").String() != "user" {
-		t.Fatalf("parsed root = %s, want user content array", root.Raw)
+		t.Fatalf("root.Get = %s, want user", root.Get("request.contents.0.role").Raw)
+	}
+}
+
+func TestParseGJSONBytesNoCopyEmptyInput(t *testing.T) {
+	if result := ParseGJSONBytesNoCopy(nil); result.Exists() {
+		t.Fatalf("empty input result = %s, want missing", result.Raw)
 	}
 }
 
@@ -38,8 +45,20 @@ func TestParseGJSONBytesNoCopyReferencesInput(t *testing.T) {
 	}
 }
 
-func TestParseGJSONBytesNoCopyEmptyInput(t *testing.T) {
-	if result := ParseGJSONBytesNoCopy(nil); result.Exists() {
-		t.Fatalf("empty input result = %s, want missing", result.Raw)
+func TestParseGJSONBytesNoCopyBackingMemory(t *testing.T) {
+	input := []byte(`{"value":"hello"}`)
+	root := ParseGJSONBytesNoCopy(input)
+	if got := root.Get("value").String(); got != "hello" {
+		t.Fatalf("initial value = %s, want hello", got)
+	}
+
+	idx := bytes.Index(input, []byte(`"hello"`))
+	if idx < 0 {
+		t.Fatal(`input did not contain "hello"`)
+	}
+
+	input[idx+1] = 'w'
+	if got := root.Get("value").String(); got != "wello" {
+		t.Fatalf("mutated value = %s, want wello", got)
 	}
 }
