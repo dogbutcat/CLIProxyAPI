@@ -53,10 +53,36 @@ type usageExecutor interface {
 	Identifier() string
 }
 
+type usageProviderContextKey struct{}
+
+// WithUsageProvider keeps facade provider identity when execution is delegated
+// to a protocol-specific executor.
+func WithUsageProvider(ctx context.Context, provider string) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	provider = strings.TrimSpace(provider)
+	if provider == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, usageProviderContextKey{}, provider)
+}
+
+func usageProviderFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	provider, _ := ctx.Value(usageProviderContextKey{}).(string)
+	return strings.TrimSpace(provider)
+}
+
 func NewExecutorUsageReporter(ctx context.Context, executor usageExecutor, model string, auth *cliproxyauth.Auth) *UsageReporter {
 	provider := ""
 	if executor != nil {
 		provider = executor.Identifier()
+	}
+	if providerOverride := usageProviderFromContext(ctx); providerOverride != "" {
+		provider = providerOverride
 	}
 	reporter := NewUsageReporter(ctx, provider, model, auth)
 	reporter.executorType = ExecutorTypeName(executor)

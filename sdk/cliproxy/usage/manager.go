@@ -235,6 +235,34 @@ func GenerateEnabled(generate *bool) bool {
 	return *generate
 }
 
+// SanitizeResponseHeaders returns a copy of headers without credential-bearing
+// header names. It is applied before records leave the usage manager.
+func SanitizeResponseHeaders(headers http.Header) http.Header {
+	if len(headers) == 0 {
+		return nil
+	}
+	out := make(http.Header, len(headers))
+	for key, values := range headers {
+		if unsafeUsageHeaderName(key) {
+			continue
+		}
+		out[key] = append([]string(nil), values...)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func unsafeUsageHeaderName(name string) bool {
+	normalized := strings.ToLower(strings.ReplaceAll(strings.TrimSpace(name), "_", "-"))
+	return strings.Contains(normalized, "authorization") ||
+		strings.Contains(normalized, "cookie") ||
+		strings.Contains(normalized, "api-key") ||
+		strings.Contains(normalized, "token") ||
+		strings.Contains(normalized, "secret")
+}
+
 // Plugin consumes usage records emitted by the proxy runtime.
 type Plugin interface {
 	HandleUsage(ctx context.Context, record Record)
@@ -247,9 +275,10 @@ type queueItem struct {
 
 // Manager maintains a queue of usage records and delivers them to registered plugins.
 type Manager struct {
-	once     sync.Once
-	stopOnce sync.Once
-	cancel   context.CancelFunc
+	lifecycleMu sync.Mutex
+	cancel      context.CancelFunc
+	done        chan struct{}
+	running     bool
 
 	mu     sync.Mutex
 	cond   *sync.Cond
@@ -273,14 +302,23 @@ func (m *Manager) Start(ctx context.Context) {
 	if m == nil {
 		return
 	}
-	m.once.Do(func() {
-		if ctx == nil {
-			ctx = context.Background()
-		}
-		var workerCtx context.Context
-		workerCtx, m.cancel = context.WithCancel(ctx)
-		go m.run(workerCtx)
-	})
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	m.lifecycleMu.Lock()
+	defer m.lifecycleMu.Unlock()
+	if m.running {
+		return
+	}
+	workerCtx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	m.cancel = cancel
+	m.done = done
+	m.running = true
+	m.mu.Lock()
+	m.closed = false
+	m.mu.Unlock()
+	go m.run(workerCtx, done)
 }
 
 // Stop stops the dispatcher and drains the queue.
@@ -288,15 +326,23 @@ func (m *Manager) Stop() {
 	if m == nil {
 		return
 	}
-	m.stopOnce.Do(func() {
-		if m.cancel != nil {
-			m.cancel()
-		}
-		m.mu.Lock()
-		m.closed = true
-		m.mu.Unlock()
-		m.cond.Broadcast()
-	})
+	m.lifecycleMu.Lock()
+	if !m.running {
+		m.lifecycleMu.Unlock()
+		return
+	}
+	cancel := m.cancel
+	done := m.done
+	if cancel != nil {
+		cancel()
+	}
+	m.mu.Lock()
+	m.closed = true
+	m.mu.Unlock()
+	m.cond.Broadcast()
+	m.lifecycleMu.Unlock()
+
+	<-done
 }
 
 // Register appends a plugin to the delivery list.
@@ -333,6 +379,37 @@ func (m *Manager) RegisterNamed(name string, plugin Plugin) {
 	m.pluginsMu.Unlock()
 }
 
+// UnregisterNamed removes a named plugin from the delivery list.
+func (m *Manager) UnregisterNamed(name string) {
+	if m == nil {
+		return
+	}
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return
+	}
+
+	m.pluginsMu.Lock()
+	defer m.pluginsMu.Unlock()
+	if m.named == nil {
+		return
+	}
+	index, exists := m.named[name]
+	if !exists {
+		return
+	}
+	delete(m.named, name)
+	if index < 0 || index >= len(m.plugins) {
+		return
+	}
+	m.plugins = append(m.plugins[:index], m.plugins[index+1:]...)
+	for pluginName, pluginIndex := range m.named {
+		if pluginIndex > index {
+			m.named[pluginName] = pluginIndex - 1
+		}
+	}
+}
+
 // Publish enqueues a usage record for processing. If no plugin is registered
 // the record will be discarded downstream.
 func (m *Manager) Publish(ctx context.Context, record Record) {
@@ -341,6 +418,7 @@ func (m *Manager) Publish(ctx context.Context, record Record) {
 	}
 	// ensure worker is running even if Start was not called explicitly
 	m.Start(context.Background())
+	record.ResponseHeaders = SanitizeResponseHeaders(record.ResponseHeaders)
 	m.mu.Lock()
 	if m.closed {
 		m.mu.Unlock()
@@ -351,7 +429,15 @@ func (m *Manager) Publish(ctx context.Context, record Record) {
 	m.cond.Signal()
 }
 
-func (m *Manager) run(ctx context.Context) {
+func (m *Manager) run(ctx context.Context, done chan<- struct{}) {
+	defer func() {
+		m.lifecycleMu.Lock()
+		m.running = false
+		m.cancel = nil
+		m.done = nil
+		m.lifecycleMu.Unlock()
+		close(done)
+	}()
 	for {
 		m.mu.Lock()
 		for !m.closed && len(m.queue) == 0 {
@@ -365,6 +451,15 @@ func (m *Manager) run(ctx context.Context) {
 		m.queue = m.queue[1:]
 		m.mu.Unlock()
 		m.dispatch(item)
+		if ctx.Err() != nil {
+			m.mu.Lock()
+			closed := m.closed
+			empty := len(m.queue) == 0
+			m.mu.Unlock()
+			if closed && empty {
+				return
+			}
+		}
 	}
 }
 
@@ -403,6 +498,9 @@ func RegisterPlugin(plugin Plugin) { DefaultManager().Register(plugin) }
 
 // RegisterNamedPlugin registers or replaces a named plugin on the default manager.
 func RegisterNamedPlugin(name string, plugin Plugin) { DefaultManager().RegisterNamed(name, plugin) }
+
+// UnregisterNamedPlugin removes a named plugin from the default manager.
+func UnregisterNamedPlugin(name string) { DefaultManager().UnregisterNamed(name) }
 
 // PublishRecord publishes a record using the default manager.
 func PublishRecord(ctx context.Context, record Record) { DefaultManager().Publish(ctx, record) }
