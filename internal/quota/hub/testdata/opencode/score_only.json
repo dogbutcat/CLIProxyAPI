@@ -1,0 +1,24 @@
+{
+  "entryName": "auth-score-only",
+  "quota": {
+    "rolling": {
+      "usagePercent": 85,
+      "percentRemaining": 15,
+      "resetInSec": 7200,
+      "resetTime": "2026-01-10T14:00:00Z"
+    },
+    "weekly": {
+      "usagePercent": 95,
+      "percentRemaining": 5,
+      "resetInSec": 14400,
+      "resetTime": "2026-01-10T16:00:00Z"
+    },
+    "monthly": {
+      "usagePercent": 60,
+      "percentRemaining": 40,
+      "resetInSec": 28800,
+      "resetTime": "2026-01-10T20:00:00Z"
+    }
+  },
+  "timestamp": "2026-01-10T12:00:00Z"
+}

@@ -614,6 +614,98 @@ func TestIsAuthBlockedForModel_ExpiredRecoveryIsAvailable(t *testing.T) {
 	}
 }
 
+func TestAuthWideQuotaHubSelector(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	recoverAt := now.Add(time.Hour)
+	modelStates := map[string]*ModelState{
+		"matched-model": {
+			Status: StatusActive,
+		},
+	}
+
+	for _, tt := range []struct {
+		name        string
+		model       string
+		modelStates map[string]*ModelState
+	}{
+		{name: "matching model", model: "matched-model", modelStates: modelStates},
+		{name: "unmatched model", model: "unmatched-model", modelStates: modelStates},
+		{name: "future model without states", model: "future-model"},
+		{name: "current request without model", model: ""},
+	} {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			auth := &Auth{
+				ID:          "quota-hub",
+				ModelStates: tt.modelStates,
+				Quota: QuotaState{
+					Exceeded:      true,
+					Reason:        quotaObservationErrorCode,
+					NextRecoverAt: recoverAt,
+				},
+			}
+			blocked, reason, next := isAuthBlockedForModel(auth, tt.model, now)
+			if !blocked || reason != blockReasonCooldown || !next.Equal(recoverAt) {
+				t.Fatalf("isAuthBlockedForModel(%q) = %v, %v, %v; want true, cooldown, %v", tt.model, blocked, reason, next, recoverAt)
+			}
+		})
+	}
+}
+
+func TestAuthWideQuotaHubSelectorExpiredRecoveryIsAvailable(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	auth := &Auth{
+		ID: "quota-hub",
+		ModelStates: map[string]*ModelState{
+			"matched-model": {
+				Status: StatusActive,
+			},
+		},
+		Quota: QuotaState{
+			Exceeded:      true,
+			Reason:        quotaObservationErrorCode,
+			NextRecoverAt: now.Add(-time.Second),
+		},
+	}
+
+	blocked, reason, next := isAuthBlockedForModel(auth, "matched-model", now)
+	if blocked || reason != blockReasonNone || !next.IsZero() {
+		t.Fatalf("isAuthBlockedForModel() = %v, %v, %v; want false, none, zero", blocked, reason, next)
+	}
+}
+
+func TestAuthWideNonQuotaHubReasonPreservesModelStateSelection(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	auth := &Auth{
+		ID: "ordinary-quota",
+		ModelStates: map[string]*ModelState{
+			"matched-model": {
+				Status: StatusActive,
+			},
+		},
+		Quota: QuotaState{
+			Exceeded:      true,
+			Reason:        "quota",
+			NextRecoverAt: now.Add(time.Hour),
+		},
+	}
+
+	for _, model := range []string{"matched-model", "unmatched-model"} {
+		blocked, reason, next := isAuthBlockedForModel(auth, model, now)
+		if blocked || reason != blockReasonNone || !next.IsZero() {
+			t.Fatalf("isAuthBlockedForModel(%q) = %v, %v, %v; want false, none, zero", model, blocked, reason, next)
+		}
+	}
+}
+
 func TestFillFirstSelectorPick_ThinkingSuffixFallsBackToBaseModelState(t *testing.T) {
 	t.Parallel()
 

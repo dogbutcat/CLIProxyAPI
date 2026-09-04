@@ -1,0 +1,24 @@
+{
+  "entryName": "auth-reset-selection",
+  "quota": {
+    "rolling": {
+      "usagePercent": 97,
+      "percentRemaining": 3,
+      "resetInSec": 10800,
+      "resetTime": "2026-01-10T15:00:00Z"
+    },
+    "weekly": {
+      "usagePercent": 97,
+      "percentRemaining": 3,
+      "resetInSec": 14400,
+      "resetTime": "2026-01-10T16:00:00Z"
+    },
+    "monthly": {
+      "usagePercent": 96,
+      "percentRemaining": 4,
+      "resetInSec": 28800,
+      "resetTime": "2026-01-10T20:00:00Z"
+    }
+  },
+  "timestamp": "2026-01-10T12:00:00Z"
+}

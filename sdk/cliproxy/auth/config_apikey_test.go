@@ -40,4 +40,16 @@ func TestIsConfigAPIKeyAuth(t *testing.T) {
 	}) {
 		t.Fatal("expected config api key auth")
 	}
+	if !IsConfigAPIKeyAuth(&Auth{
+		ID:       "opencode-go:openai:abc",
+		Provider: "opencode-go",
+		Attributes: map[string]string{
+			"api_key":        "k",
+			"auth_kind":      AuthKindAPIKey,
+			"runtime_only":   "true",
+			"source_backend": AuthSourceConfig,
+		},
+	}) {
+		t.Fatal("expected runtime-only config api key auth")
+	}
 }
