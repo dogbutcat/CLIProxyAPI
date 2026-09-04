@@ -13,7 +13,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/clienterror"
-	"github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
+	internallogging "github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
 	_ "github.com/router-for-me/CLIProxyAPI/v8/internal/thinking/provider/codex"
@@ -773,6 +773,19 @@ func TestNewExecutorUsageReporterIncludesExecutorType(t *testing.T) {
 	}
 }
 
+func TestNewExecutorUsageReporterUsesFacadeProviderOverride(t *testing.T) {
+	ctx := WithUsageProvider(context.Background(), "opencode-go")
+	reporter := NewExecutorUsageReporter(ctx, &TestUsageExecutor{}, "qwen3.7-plus", nil)
+
+	record := reporter.buildRecord(usage.Detail{TotalTokens: 3}, false)
+	if record.Provider != "opencode-go" {
+		t.Fatalf("provider = %q, want opencode-go", record.Provider)
+	}
+	if record.ExecutorType != "TestUsageExecutor" {
+		t.Fatalf("executor type = %q, want TestUsageExecutor", record.ExecutorType)
+	}
+}
+
 func TestUsageReporterBuildRecordIncludesReasoningEffort(t *testing.T) {
 	ctx := usage.WithReasoningEffort(context.Background(), "medium")
 	reporter := NewUsageReporter(ctx, "openai", "gpt-5.4", nil)
@@ -841,6 +854,38 @@ func TestUsageReporterSetStream(t *testing.T) {
 	record := reporter.buildRecord(usage.Detail{TotalTokens: 3}, false)
 	if !record.Stream {
 		t.Fatalf("stream = %v, want true", record.Stream)
+	}
+}
+
+func TestUsageReporterPublishRecordSanitizesResponseHeaders(t *testing.T) {
+	ctx := internallogging.WithResponseHeadersHolder(context.Background())
+	internallogging.SetResponseHeaders(ctx, http.Header{
+		"Authorization": {"Bearer secret"},
+		"Cookie":        {"session=secret"},
+		"X-Api-Key":     {"secret"},
+		"X-Request-Id":  {"safe"},
+	})
+
+	got := make(chan http.Header, 1)
+	usage.RegisterNamedPlugin("test-helper-sanitize", usagePluginFunc(func(_ context.Context, record usage.Record) {
+		got <- record.ResponseHeaders
+	}))
+	usage.StartDefault(context.Background())
+	t.Cleanup(func() {
+		usage.StopDefault()
+		usage.UnregisterNamedPlugin("test-helper-sanitize")
+	})
+
+	reporter := NewUsageReporter(ctx, "openai", "gpt-5.4", nil)
+	reporter.publishRecord(ctx, reporter.buildRecord(usage.Detail{TotalTokens: 1}, false))
+	usage.StopDefault()
+
+	headers := <-got
+	if headers.Get("Authorization") != "" || headers.Get("Cookie") != "" || headers.Get("X-Api-Key") != "" {
+		t.Fatalf("secret headers survived sanitation: %#v", headers)
+	}
+	if headers.Get("X-Request-Id") != "safe" {
+		t.Fatalf("safe header missing after sanitation: %#v", headers)
 	}
 }
 
@@ -1096,7 +1141,7 @@ func (TestUsageExecutor) Identifier() string {
 }
 
 func TestUsageReporterPropagatesSessionHierarchy(t *testing.T) {
-	ctx := logging.WithClientRequestMetadata(context.Background(), logging.ClientRequestMetadata{
+	ctx := internallogging.WithClientRequestMetadata(context.Background(), internallogging.ClientRequestMetadata{
 		SessionID:       "claude:sess-1:agent:sub-1",
 		ParentSessionID: "claude:sess-1",
 	})
@@ -1129,7 +1174,7 @@ func TestUsageReporterPropagatesSessionHierarchy(t *testing.T) {
 	}
 
 	// Test cross-prefix alias rejection (e.g. pck:* and conv:* are aliases, not parent-child)
-	ctxAlias := logging.WithClientRequestMetadata(context.Background(), logging.ClientRequestMetadata{
+	ctxAlias := internallogging.WithClientRequestMetadata(context.Background(), internallogging.ClientRequestMetadata{
 		SessionID:       "pck:prompt-key-123",
 		ParentSessionID: "conv:conv-456",
 	})
@@ -1218,7 +1263,7 @@ func TestUsageReporterPropagatesBaseURL(t *testing.T) {
 }
 
 func TestUsageReporter_AllocatesUniqueUUIDPerAttemptWithSharedTraceID(t *testing.T) {
-	ctx := logging.WithRequestID(context.Background(), "00000042")
+	ctx := internallogging.WithRequestID(context.Background(), "00000042")
 
 	// First execution attempt
 	reporter1 := NewUsageReporter(ctx, "openai", "gpt-5.4", nil)
@@ -1258,7 +1303,7 @@ func TestUsageReporter_AllocatesUniqueUUIDPerAttemptWithSharedTraceID(t *testing
 }
 
 func TestUsageReporter_ExplicitTraceIDPrecedenceOverLogRequestID(t *testing.T) {
-	ctx := logging.WithRequestID(context.Background(), "log-id-1")
+	ctx := internallogging.WithRequestID(context.Background(), "log-id-1")
 	ctx = usage.WithTraceID(ctx, "explicit-trace-1")
 
 	reporter := NewUsageReporter(ctx, "openai", "gpt-5.4", nil)
@@ -1267,4 +1312,10 @@ func TestUsageReporter_ExplicitTraceIDPrecedenceOverLogRequestID(t *testing.T) {
 	if record.TraceID != "explicit-trace-1" {
 		t.Fatalf("record.TraceID = %q, want explicit-trace-1", record.TraceID)
 	}
+}
+
+type usagePluginFunc func(context.Context, usage.Record)
+
+func (f usagePluginFunc) HandleUsage(ctx context.Context, record usage.Record) {
+	f(ctx, record)
 }
