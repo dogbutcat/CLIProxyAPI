@@ -1,0 +1,56 @@
+{
+  "five_hour": {
+    "utilization": 20
+  },
+  "seven_day": {
+    "utilization": 30
+  },
+  "seven_day_oauth_apps": {
+    "utilization": 100,
+    "resets_at": "2026-01-20T00:00:00Z"
+  },
+  "seven_day_opus": {
+    "utilization": 100
+  },
+  "seven_day_sonnet": {
+    "utilization": 100
+  },
+  "seven_day_cowork": {
+    "utilization": 100
+  },
+  "seven_day_fable": {
+    "utilization": 100
+  },
+  "iguana_necktie": {
+    "utilization": 100
+  },
+  "limits": [
+    {
+      "kind": "weekly_scoped",
+      "percent": 100,
+      "resets_at": "2026-01-20T00:00:00Z",
+      "scope": {
+        "model": {
+          "display_name": "Fable"
+        }
+      }
+    }
+  ],
+  "extra_usage": {
+    "is_enabled": true,
+    "monthly_limit": 100,
+    "used_credits": 100,
+    "utilization": 100,
+    "five_hour": {
+      "utilization": 100
+    }
+  },
+  "nested": {
+    "five_hour": {
+      "utilization": 100
+    },
+    "seven_day": {
+      "utilization": 100
+    }
+  }
+}

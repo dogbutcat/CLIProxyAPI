@@ -1,0 +1,10 @@
+{
+  "five_hour": {
+    "utilization": 100,
+    "resets_at": "2026-01-10T21:00:00+08:00"
+  },
+  "seven_day": {
+    "utilization": 40,
+    "resets_at": "malformed-but-non-blocking"
+  }
+}
