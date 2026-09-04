@@ -2,6 +2,10 @@ package usage
 
 import (
 	"context"
+	"net/http"
+	"reflect"
+	"sync"
+	"sync/atomic"
 	"testing"
 )
 
@@ -73,4 +77,79 @@ func TestRecordOmittedGenerateIsEnabled(t *testing.T) {
 	if !GenerateEnabled(record.Generate) {
 		t.Fatalf("GenerateEnabled(omitted) = false, want true")
 	}
+}
+
+func TestManagerUnregisterNamedRemovesPluginAndKeepsIndexes(t *testing.T) {
+	manager := NewManager(4)
+	var mu sync.Mutex
+	calls := []string{}
+	recordCall := func(name string) Plugin {
+		return usagePluginFunc(func(context.Context, Record) {
+			mu.Lock()
+			defer mu.Unlock()
+			calls = append(calls, name)
+		})
+	}
+	manager.RegisterNamed("a", recordCall("a"))
+	manager.RegisterNamed("b", recordCall("b"))
+	manager.RegisterNamed("c", recordCall("c"))
+	manager.UnregisterNamed("b")
+	manager.RegisterNamed("c", recordCall("c2"))
+	manager.Start(context.Background())
+	manager.Publish(context.Background(), Record{Provider: "test"})
+	manager.Stop()
+
+	mu.Lock()
+	defer mu.Unlock()
+	want := []string{"a", "c2"}
+	if !reflect.DeepEqual(calls, want) {
+		t.Fatalf("calls = %#v, want %#v", calls, want)
+	}
+}
+
+func TestManagerRestartAfterStop(t *testing.T) {
+	manager := NewManager(4)
+	var count atomic.Int64
+	manager.RegisterNamed("count", usagePluginFunc(func(context.Context, Record) { count.Add(1) }))
+	manager.Start(context.Background())
+	manager.Publish(context.Background(), Record{Provider: "first"})
+	manager.Stop()
+	manager.Start(context.Background())
+	manager.Publish(context.Background(), Record{Provider: "second"})
+	manager.Stop()
+	if got := count.Load(); got != 2 {
+		t.Fatalf("count = %d, want 2", got)
+	}
+}
+
+func TestManagerSanitizesSecretResponseHeaders(t *testing.T) {
+	manager := NewManager(4)
+	defer manager.Stop()
+	got := make(chan http.Header, 1)
+	manager.RegisterNamed("capture", usagePluginFunc(func(_ context.Context, record Record) {
+		got <- record.ResponseHeaders
+	}))
+	manager.Publish(context.Background(), Record{
+		ResponseHeaders: http.Header{
+			"Authorization":     {"Bearer secret"},
+			"Cookie":            {"session=secret"},
+			"X-Api-Key":         {"secret"},
+			"X-Request-Id":      {"safe"},
+			"X-Codex-Plan-Type": {"plus"},
+		},
+	})
+	manager.Stop()
+	headers := <-got
+	if headers.Get("Authorization") != "" || headers.Get("Cookie") != "" || headers.Get("X-Api-Key") != "" {
+		t.Fatalf("secret headers survived sanitation: %#v", headers)
+	}
+	if headers.Get("X-Request-Id") != "safe" || headers.Get("X-Codex-Plan-Type") != "plus" {
+		t.Fatalf("safe headers missing after sanitation: %#v", headers)
+	}
+}
+
+type usagePluginFunc func(context.Context, Record)
+
+func (f usagePluginFunc) HandleUsage(ctx context.Context, record Record) {
+	f(ctx, record)
 }
