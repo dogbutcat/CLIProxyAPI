@@ -2,6 +2,7 @@ package oagmsg
 
 import (
 	"context"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -81,6 +82,10 @@ type RequestTranslationOptions struct {
 	// PreserveThinkingBlocks keeps unsigned and opaque thinking history for
 	// explicitly configured third-party compatibility endpoints.
 	PreserveThinkingBlocks bool
+
+	// AllowResponsesAgentMessages enables Codex multi-agent Responses input
+	// normalization for call sites that already passed the client/config gate.
+	AllowResponsesAgentMessages bool
 }
 
 // TranslateRequest converts a request directly through oagmsg.
@@ -94,14 +99,15 @@ func TranslateRequestWithOptions[From ~string, To ~string](fromValue From, toVal
 	from := Format(fromValue)
 	to := Format(toValue)
 	hooks := currentPluginHooks()
+	body := normalizeResponsesAgentMessagesForTranslation(from, to, rawJSON, options)
 
-	switch translationPath := selectRequestTranslationPath(from, to, model, rawJSON, hooks); translationPath {
+	switch translationPath := selectRequestTranslationPath(from, to, model, body, hooks); translationPath {
 	case requestTranslationPathIdentity:
-		return finalizeRequestForTarget(to, rawJSON, stream)
+		return finalizeRequestForTarget(to, body, stream)
 	case requestTranslationPathSameWire:
 		fallthrough
 	case requestTranslationPathCodexFinalize:
-		body := setRuntimeModel(rawJSON, model)
+		body := setRuntimeModel(body, model)
 		if hooks != nil {
 			body = hooks.NormalizeRequest(context.Background(), from, to, model, body, stream)
 		}
@@ -115,10 +121,9 @@ func TranslateRequestWithOptions[From ~string, To ~string](fromValue From, toVal
 	registry := DefaultRegistry()
 	source, sourceOK := registry.Get(from)
 	target, targetOK := registry.Get(to)
-	body := rawJSON
 	if sourceOK && targetOK {
-		summaryConfig := thinking.ExtractSummaryConfig(rawJSON, from.String())
-		req, err := source.ParseRequest(rawJSON)
+		summaryConfig := thinking.ExtractSummaryConfig(body, from.String())
+		req, err := source.ParseRequest(body)
 		if err == nil {
 			req.Model = modelOrExisting(model, req.Model)
 			req.Stream = stream
@@ -157,6 +162,80 @@ func TranslateRequestWithOptions[From ~string, To ~string](fromValue From, toVal
 	body = applyCodexRequestMetadataForTarget(to, body, rawJSON)
 	body = applyOpenAIChatCodexRequestDefaults(from, to, body)
 	return finalizeRequestForTarget(to, body, stream)
+}
+
+func normalizeResponsesAgentMessagesForTranslation(from, to Format, rawJSON []byte, options RequestTranslationOptions) []byte {
+	if !options.AllowResponsesAgentMessages || resolveFormat(from) != FormatOpenAIResponse {
+		return rawJSON
+	}
+	target := resolveFormat(to)
+	if target == FormatOpenAIResponse || target == FormatCodex {
+		return rawJSON
+	}
+	input := gjson.GetBytes(rawJSON, "input")
+	if !input.IsArray() {
+		return rawJSON
+	}
+
+	updated := rawJSON
+	changed := false
+	for itemIndex, item := range input.Array() {
+		if strings.TrimSpace(item.Get("type").String()) != "agent_message" {
+			continue
+		}
+		itemPath := "input." + strconv.Itoa(itemIndex)
+		var errSet error
+		updated, errSet = sjson.SetBytes(updated, itemPath+".type", "message")
+		if errSet != nil {
+			return rawJSON
+		}
+		updated, errSet = sjson.SetBytes(updated, itemPath+".role", "user")
+		if errSet != nil {
+			return rawJSON
+		}
+		next, ok := normalizeResponsesAgentMessageContent(updated, itemPath, item)
+		if !ok {
+			return rawJSON
+		}
+		updated = next
+		changed = true
+	}
+	if !changed {
+		return rawJSON
+	}
+	return updated
+}
+
+func normalizeResponsesAgentMessageContent(rawJSON []byte, itemPath string, item gjson.Result) ([]byte, bool) {
+	content := item.Get("content")
+	if !content.IsArray() {
+		return rawJSON, true
+	}
+	updated := rawJSON
+	for partIndex, part := range content.Array() {
+		if strings.TrimSpace(part.Get("type").String()) != "encrypted_content" {
+			continue
+		}
+		encrypted := part.Get("encrypted_content")
+		if encrypted.Type != gjson.String {
+			continue
+		}
+		partPath := itemPath + ".content." + strconv.Itoa(partIndex)
+		var errSet error
+		updated, errSet = sjson.SetBytes(updated, partPath+".type", "input_text")
+		if errSet != nil {
+			return rawJSON, false
+		}
+		updated, errSet = sjson.SetBytes(updated, partPath+".text", encrypted.String())
+		if errSet != nil {
+			return rawJSON, false
+		}
+		updated, errSet = sjson.DeleteBytes(updated, partPath+".encrypted_content")
+		if errSet != nil {
+			return rawJSON, false
+		}
+	}
+	return updated, true
 }
 
 type requestPathKind int

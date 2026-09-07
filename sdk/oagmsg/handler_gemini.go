@@ -528,6 +528,31 @@ func ensureGeminiLeadingUserContentItems(contents []any) []any {
 	return normalized
 }
 
+func ensureGeminiTrailingUserContentItems(contents []any) []any {
+	if len(contents) == 0 {
+		return contents
+	}
+	last, ok := contents[len(contents)-1].(map[string]any)
+	if !ok {
+		return contents
+	}
+	role := strings.TrimSpace(strings.ToLower(stringValue(last["role"])))
+	if role != "model" && role != "assistant" {
+		return contents
+	}
+	_, parts, ok := geminiSerializedContentParts(last)
+	if ok && geminiContentPartsContainFunctionResponse(parts) {
+		return contents
+	}
+	normalized := make([]any, 0, len(contents)+1)
+	normalized = append(normalized, contents...)
+	normalized = append(normalized, map[string]any{
+		"role":  "user",
+		"parts": []any{map[string]any{"text": ""}},
+	})
+	return normalized
+}
+
 func normalizeGeminiRequestContents(contents []any) []any {
 	if len(contents) <= 1 {
 		return contents
@@ -673,6 +698,12 @@ func geminiContentPartsAreOnlyFunctionCalls(parts []any) bool {
 	return true
 }
 
+func ensureGeminiBoundaryUserContentItems(contents []any) []any {
+	contents = ensureGeminiLeadingUserContentItems(contents)
+	contents = normalizeGeminiRequestContents(contents)
+	return ensureGeminiTrailingUserContentItems(contents)
+}
+
 // SerializeRequest converts a UnifiedRequest to Gemini generateContent JSON.
 func (h *GeminiHandler) SerializeRequest(req *UnifiedRequest) ([]byte, error) {
 	out := map[string]any{}
@@ -734,8 +765,7 @@ func (h *GeminiHandler) SerializeRequest(req *UnifiedRequest) ([]byte, error) {
 		}
 	}
 	flushPendingSystemDemotions()
-	contents = ensureGeminiLeadingUserContentItems(contents)
-	contents = normalizeGeminiRequestContents(contents)
+	contents = ensureGeminiBoundaryUserContentItems(contents)
 
 	if len(systemParts) > 0 {
 		out["systemInstruction"] = map[string]any{

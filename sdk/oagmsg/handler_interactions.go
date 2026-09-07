@@ -175,6 +175,10 @@ func (h *InteractionsHandler) parseInputItem(itemType string, item gjson.Result,
 				switch cbType {
 				case "input_text":
 					blocks = append(blocks, withParsedCacheControl(TextBlock{Text: cb.Get("text").String()}, cacheCtrl))
+				case "encrypted_content":
+					if encrypted := cb.Get("encrypted_content"); encrypted.Type == gjson.String {
+						blocks = append(blocks, withParsedCacheControl(TextBlock{Text: encrypted.String()}, cacheCtrl))
+					}
 				case "input_image":
 					if image := parseResponsesImagePart(cb); image != nil {
 						blocks = append(blocks, withParsedCacheControl(image, cacheCtrl))

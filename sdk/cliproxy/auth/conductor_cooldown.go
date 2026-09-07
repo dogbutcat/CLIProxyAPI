@@ -1099,7 +1099,13 @@ func restoreAuthWideQuotaObservationAfterAuthFailure(auth *Auth, overlay authWid
 	}
 	quota := overlay.quota
 	if isCloudflareChallengeResultError(resultErr) {
+		cloudflareQuota := auth.Quota
 		quota.BackoffLevel = auth.Quota.BackoffLevel
+		auth.Quota = quota
+		if cloudflareQuota.Reason == "cloudflare challenge" {
+			auth.NextRetryAfter = cloudflareQuota.NextRecoverAt
+		}
+		return
 	}
 	auth.Quota = quota
 }

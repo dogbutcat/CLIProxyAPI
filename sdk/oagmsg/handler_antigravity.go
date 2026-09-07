@@ -74,6 +74,8 @@ func (h *AntigravityHandler) SerializeRequest(req *UnifiedRequest) ([]byte, erro
 	// Antigravity uses "parametersJsonSchema" instead of "parameters" for tool schemas.
 	geminiBody = renameToolParameters(geminiBody)
 	geminiBody = normalizeAntigravityToolRequestBody(geminiBody)
+	geminiBody = enableAntigravityResponsesThinkingSummaryForRequest(req, geminiBody)
+	geminiBody = omitAntigravityToolsWhenToolChoiceNone(req, geminiBody)
 	if !antigravityClaudeTarget(req.Model) {
 		geminiBody = rewriteAntigravityRequestToolNamesToUpstream(geminiBody)
 	}
@@ -428,6 +430,63 @@ func renameToolParameters(geminiBody []byte) []byte {
 func normalizeAntigravityToolRequestBody(geminiBody []byte) []byte {
 	geminiBody = normalizeAntigravityFunctionResponseResults(geminiBody)
 	return collapseAntigravityFunctionDeclarations(geminiBody)
+}
+
+func enableAntigravityResponsesThinkingSummaryForRequest(req *UnifiedRequest, geminiBody []byte) []byte {
+	if req == nil || req.Thinking == nil || resolveFormat(req.SourceFormat) != FormatOpenAIResponse {
+		return geminiBody
+	}
+	effort := strings.ToLower(strings.TrimSpace(ThinkingEffort(req.Thinking)))
+	if effort == "" || effort == "none" {
+		return geminiBody
+	}
+	if util.GetGJSONBytesNoCopy(geminiBody, "generationConfig.thinkingConfig.includeThoughts").Exists() {
+		return geminiBody
+	}
+	out, err := sjson.SetBytes(geminiBody, "generationConfig.thinkingConfig.includeThoughts", true)
+	if err != nil {
+		return geminiBody
+	}
+	return out
+}
+
+func omitAntigravityToolsWhenToolChoiceNone(req *UnifiedRequest, geminiBody []byte) []byte {
+	if req == nil || req.ToolChoice == nil {
+		return geminiBody
+	}
+	if !antigravityRequestToolChoiceNone(req.ToolChoice) && !antigravityGeminiFunctionCallingModeNone(geminiBody) {
+		return geminiBody
+	}
+	out, err := sjson.DeleteBytes(geminiBody, "tools")
+	if err != nil {
+		return geminiBody
+	}
+	return out
+}
+
+func antigravityRequestToolChoiceNone(choice any) bool {
+	switch value := choice.(type) {
+	case string:
+		return strings.EqualFold(strings.TrimSpace(value), "none")
+	case map[string]any:
+		return strings.EqualFold(strings.TrimSpace(stringValue(value["type"])), "none")
+	default:
+		return false
+	}
+}
+
+func antigravityGeminiFunctionCallingModeNone(geminiBody []byte) bool {
+	for _, path := range []string{
+		"toolConfig.functionCallingConfig.mode",
+		"tool_config.function_calling_config.mode",
+		"generationConfig.toolConfig.functionCallingConfig.mode",
+		"generation_config.tool_config.function_calling_config.mode",
+	} {
+		if strings.EqualFold(strings.TrimSpace(util.GetGJSONBytesNoCopy(geminiBody, path).String()), "NONE") {
+			return true
+		}
+	}
+	return false
 }
 
 func normalizeAntigravityFunctionResponseResults(geminiBody []byte) []byte {

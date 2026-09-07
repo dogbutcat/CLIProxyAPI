@@ -68,6 +68,53 @@ func TestResponsesToClaudeTurnToolAlignmentSkipsEmptyUserItems(t *testing.T) {
 	}
 }
 
+func TestAnthropicToolResultAlignmentPreservesNonResultSlots(t *testing.T) {
+	raw := []byte(`{
+		"model":"claude-test",
+		"messages":[
+			{"role":"user","content":"start"},
+			{"role":"assistant","content":[
+				{"type":"tool_use","id":"call_1","name":"one","input":{}},
+				{"type":"tool_use","id":"call_2","name":"two","input":{}}
+			]},
+			{"role":"user","content":[
+				{"type":"text","text":"before"},
+				{"type":"tool_result","tool_use_id":"call_2","content":"two"},
+				{"type":"text","text":"middle"},
+				{"type":"tool_result","tool_use_id":"call_1","content":"one"},
+				{"type":"text","text":"after"}
+			]}
+		]
+	}`)
+
+	req, err := (&AnthropicHandler{}).ParseRequest(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(req.Messages) != 3 {
+		t.Fatalf("message count = %d, want 3", len(req.Messages))
+	}
+	blocks := req.Messages[2].Content
+	if got, want := len(blocks), 5; got != want {
+		t.Fatalf("block count = %d, want %d", got, want)
+	}
+	if got := blockTextForTest(blocks[0]); got != "before" {
+		t.Fatalf("block 0 text = %q, want before", got)
+	}
+	if got := toolResultIDForTest(blocks[1]); got != "call_1" {
+		t.Fatalf("block 1 tool_use_id = %q, want call_1", got)
+	}
+	if got := blockTextForTest(blocks[2]); got != "middle" {
+		t.Fatalf("block 2 text = %q, want middle", got)
+	}
+	if got := toolResultIDForTest(blocks[3]); got != "call_2" {
+		t.Fatalf("block 3 tool_use_id = %q, want call_2", got)
+	}
+	if got := blockTextForTest(blocks[4]); got != "after" {
+		t.Fatalf("block 4 text = %q, want after", got)
+	}
+}
+
 func TestResponsesToClaudeParsesMessageShorthandWithInstructions(t *testing.T) {
 	raw := []byte(`{
 		"model":"claude-haiku-4-5-20251001",
@@ -246,4 +293,18 @@ func claudeContentTypes(message gjson.Result) []string {
 		types = append(types, block.Get("type").String())
 	}
 	return types
+}
+
+func blockTextForTest(block ContentBlock) string {
+	if text, ok := block.(TextBlock); ok {
+		return text.Text
+	}
+	return ""
+}
+
+func toolResultIDForTest(block ContentBlock) string {
+	if result, ok := block.(ToolResultBlock); ok {
+		return result.ToolUseID
+	}
+	return ""
 }

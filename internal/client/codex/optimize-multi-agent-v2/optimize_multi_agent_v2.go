@@ -85,13 +85,16 @@ func RewriteCodexOrphanDelegationInputForConfig(ctx context.Context, headers htt
 // TranslateRequestWithCodexMultiAgentV2 normalizes official Codex multi-agent
 // input before translating it to a non-Codex target protocol.
 func TranslateRequestWithCodexMultiAgentV2(ctx context.Context, headers http.Header, cfg *config.Config, from, to sdktranslator.Format, model string, payload []byte, stream bool) []byte {
+	allowResponsesAgentMessages := false
 	if from == sdktranslator.FormatOpenAIResponse {
 		payload = RewriteCodexOrphanDelegationInputForConfig(ctx, headers, payload, cfg)
 		if to != sdktranslator.FormatCodex && to != sdktranslator.FormatOpenAIResponse {
-			payload = RewriteCodexMultiAgentV2Input(ctx, headers, payload, cfg)
+			allowResponsesAgentMessages = codexMultiAgentV2Enabled(ctx, headers, cfg)
 		}
 	}
-	return oagmsg.TranslateRequest(from, to, model, payload, stream)
+	return oagmsg.TranslateRequestWithOptions(from, to, model, payload, stream, oagmsg.RequestTranslationOptions{
+		AllowResponsesAgentMessages: allowResponsesAgentMessages,
+	})
 }
 
 // PrepareCodexMultiAgentV2Tools prepares collaboration tool definitions at the
