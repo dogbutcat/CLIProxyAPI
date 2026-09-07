@@ -528,6 +528,31 @@ func ensureGeminiLeadingUserContentItems(contents []any) []any {
 	return normalized
 }
 
+func ensureGeminiTrailingUserContentItems(contents []any) []any {
+	if len(contents) == 0 {
+		return contents
+	}
+	last, ok := contents[len(contents)-1].(map[string]any)
+	if !ok {
+		return contents
+	}
+	role := strings.TrimSpace(strings.ToLower(stringValue(last["role"])))
+	if role != "model" && role != "assistant" {
+		return contents
+	}
+	_, parts, ok := geminiSerializedContentParts(last)
+	if ok && geminiContentPartsContainFunctionResponse(parts) {
+		return contents
+	}
+	normalized := make([]any, 0, len(contents)+1)
+	normalized = append(normalized, contents...)
+	normalized = append(normalized, map[string]any{
+		"role":  "user",
+		"parts": []any{map[string]any{"text": ""}},
+	})
+	return normalized
+}
+
 func normalizeGeminiRequestContents(contents []any) []any {
 	if len(contents) <= 1 {
 		return contents
@@ -673,6 +698,12 @@ func geminiContentPartsAreOnlyFunctionCalls(parts []any) bool {
 	return true
 }
 
+func ensureGeminiBoundaryUserContentItems(contents []any) []any {
+	contents = ensureGeminiLeadingUserContentItems(contents)
+	contents = normalizeGeminiRequestContents(contents)
+	return ensureGeminiTrailingUserContentItems(contents)
+}
+
 // SerializeRequest converts a UnifiedRequest to Gemini generateContent JSON.
 func (h *GeminiHandler) SerializeRequest(req *UnifiedRequest) ([]byte, error) {
 	out := map[string]any{}
@@ -685,7 +716,8 @@ func (h *GeminiHandler) SerializeRequest(req *UnifiedRequest) ([]byte, error) {
 	var systemParts []any
 	var contents []any
 	toolNames := make(map[string]string)
-	for _, msg := range req.Messages {
+	messagesForSerialization := geminiMessagesForSerialization(req)
+	for _, msg := range messagesForSerialization {
 		for _, use := range msg.GetToolUses() {
 			if use.ID != "" && use.Name != "" {
 				toolNames[use.ID] = use.Name
@@ -703,7 +735,7 @@ func (h *GeminiHandler) SerializeRequest(req *UnifiedRequest) ([]byte, error) {
 		pendingSystemDemotions = nil
 	}
 
-	for _, msg := range req.Messages {
+	for _, msg := range messagesForSerialization {
 		if isGeminiSystemRole(msg.Role) {
 			if !hasEncounteredConversation {
 				systemParts = appendGeminiSystemInstructionParts(systemParts, msg)
@@ -734,8 +766,7 @@ func (h *GeminiHandler) SerializeRequest(req *UnifiedRequest) ([]byte, error) {
 		}
 	}
 	flushPendingSystemDemotions()
-	contents = ensureGeminiLeadingUserContentItems(contents)
-	contents = normalizeGeminiRequestContents(contents)
+	contents = ensureGeminiBoundaryUserContentItems(contents)
 
 	if len(systemParts) > 0 {
 		out["systemInstruction"] = map[string]any{
@@ -820,6 +851,18 @@ func messageHasGeminiToolResult(msg OagMessage) bool {
 
 // ParseResponse parses a non-streaming Gemini generateContent response.
 func (h *GeminiHandler) ParseResponse(rawJSON []byte) (*UnifiedResponse, error) {
+	return h.parseResponse(rawJSON, "")
+}
+
+func (h *GeminiHandler) parseResponseWithContext(rawJSON []byte, ctx *TranslationContext) (*UnifiedResponse, error) {
+	modelName := ""
+	if ctx != nil {
+		modelName = ctx.ModelName
+	}
+	return h.parseResponse(rawJSON, modelName)
+}
+
+func (h *GeminiHandler) parseResponse(rawJSON []byte, modelName string) (*UnifiedResponse, error) {
 	if err := validateJSONObject(rawJSON); err != nil {
 		return nil, err
 	}
@@ -846,6 +889,8 @@ func (h *GeminiHandler) ParseResponse(rawJSON []byte) (*UnifiedResponse, error) 
 				resp.ThinkingSignature = geminiPartSignature(part)
 			} else if text := part.Get("text"); text.Exists() {
 				textParts = append(textParts, text.String())
+			} else if text := part.Get("audioTranscription.text"); text.Exists() {
+				textParts = append(textParts, text.String())
 			}
 			if fc := part.Get("functionCall"); fc.Exists() {
 				var tcMap map[string]any
@@ -856,7 +901,7 @@ func (h *GeminiHandler) ParseResponse(rawJSON []byte) (*UnifiedResponse, error) 
 		}
 		resp.Content = strings.Join(textParts, "")
 	}
-	if items := geminiResponseSignatureOutputItems(rawJSON, resp.ID); len(items) > 0 {
+	if items := geminiResponseSignatureOutputItems(modelOrExisting(modelName, resp.Model), rawJSON, resp.ID); len(items) > 0 {
 		resp.responsesOutput = items
 	}
 

@@ -204,10 +204,10 @@ func TestOracleCodexFD1ClaudeDocumentGroupingStopsAtToolBoundaries(t *testing.T)
 	t83AssertCodexFinalInputSemanticsEqual(t, oracle, got)
 
 	input := gjson.GetBytes(got, "input").Array()
-	if len(input) != 5 {
-		t.Fatalf("boundary input item count = %d, want 5; body=%s", len(input), got)
+	if len(input) != 6 {
+		t.Fatalf("boundary input item count = %d, want 6; body=%s", len(input), got)
 	}
-	wantKinds := []string{"message", "function_call", "message", "function_call_output", "message"}
+	wantKinds := []string{"message", "function_call", "message", "message", "function_call_output", "message"}
 	for i, wantKind := range wantKinds {
 		if gotKind := input[i].Get("type").String(); gotKind != wantKind {
 			t.Fatalf("input[%d] type = %q, want %q; body=%s", i, gotKind, wantKind, got)

@@ -269,6 +269,41 @@ func TestUpstreamResponsesStringInputToGeminiContent(t *testing.T) {
 	}
 }
 
+func TestUpstreamResponsesAgentMessageNormalizesEncryptedContent(t *testing.T) {
+	raw := []byte(`{
+		"model":"claude-test",
+		"input":[{
+			"type":"agent_message",
+			"content":[
+				{"type":"encrypted_content","encrypted_content":"delegated task text"},
+				{"type":"input_text","text":"visible task text"}
+			]
+		}]
+	}`)
+
+	defaultOut := TranslateRequest(FormatOpenAIResponse, FormatAnthropic, "claude-test", raw, false)
+	if count := gjson.GetBytes(defaultOut, "messages.#").Int(); count != 0 {
+		t.Fatalf("default translation accepted agent_message; output=%s", defaultOut)
+	}
+
+	out := TranslateRequestWithOptions(FormatOpenAIResponse, FormatAnthropic, "claude-test", raw, false, RequestTranslationOptions{
+		AllowResponsesAgentMessages: true,
+	})
+	messages := gjson.GetBytes(out, "messages").Array()
+	if len(messages) != 1 {
+		t.Fatalf("message count = %d, want 1; output=%s", len(messages), out)
+	}
+	if got := messages[0].Get("role").String(); got != "user" {
+		t.Fatalf("role = %q, want user; output=%s", got, out)
+	}
+	if got := messages[0].Get("content.0.text").String(); got != "delegated task text" {
+		t.Fatalf("encrypted content text = %q, want delegated task text; output=%s", got, out)
+	}
+	if got := messages[0].Get("content.1.text").String(); got != "visible task text" {
+		t.Fatalf("visible content text = %q, want visible task text; output=%s", got, out)
+	}
+}
+
 func TestUpstreamResponsesToGeminiStructuredFunctionOutputUsesResultEnvelope(t *testing.T) {
 	raw := []byte(`{
 		"model":"gemini-3.7-flash-high",
@@ -331,6 +366,59 @@ func TestUpstreamResponsesToGeminiToolResultImageNestsInlineData(t *testing.T) {
 	}
 }
 
+func TestUpstreamResponsesToGeminiAndAntigravityAppendEmptyUserForTrailingModel(t *testing.T) {
+	raw := []byte(`{
+		"model":"gemini-3-flash",
+		"input":[
+			{"type":"message","role":"user","content":[{"type":"input_text","text":"start"}]},
+			{"type":"message","role":"assistant","content":[{"type":"output_text","text":"prior answer"}]}
+		]
+	}`)
+
+	geminiOut := TranslateRequest(FormatOpenAIResponse, FormatGemini, "gemini-3-flash", raw, false)
+	geminiContents := gjson.GetBytes(geminiOut, "contents").Array()
+	if len(geminiContents) != 3 {
+		t.Fatalf("Gemini contents length = %d, want 3; output=%s", len(geminiContents), geminiOut)
+	}
+	if got := geminiContents[2].Get("role").String(); got != "user" {
+		t.Fatalf("Gemini trailing role = %q, want user; output=%s", got, geminiOut)
+	}
+	if got := geminiContents[2].Get("parts.0.text").String(); got != "" {
+		t.Fatalf("Gemini trailing text = %q, want empty; output=%s", got, geminiOut)
+	}
+
+	antigravityOut := TranslateRequest(FormatOpenAIResponse, FormatAntigravity, "gemini-3-flash", raw, false)
+	agContents := gjson.GetBytes(antigravityOut, "request.contents").Array()
+	if len(agContents) != 3 {
+		t.Fatalf("Antigravity contents length = %d, want 3; output=%s", len(agContents), antigravityOut)
+	}
+	if got := agContents[2].Get("role").String(); got != "user" {
+		t.Fatalf("Antigravity trailing role = %q, want user; output=%s", got, antigravityOut)
+	}
+	if got := agContents[2].Get("parts.0.text").String(); got != "" {
+		t.Fatalf("Antigravity trailing text = %q, want empty; output=%s", got, antigravityOut)
+	}
+}
+
+func TestUpstreamResponsesToGeminiDoesNotAppendAfterFunctionResponse(t *testing.T) {
+	raw := []byte(`{
+		"model":"gemini-3-flash",
+		"input":[
+			{"type":"function_call","call_id":"call_1","name":"run","arguments":"{}"},
+			{"type":"function_call_output","call_id":"call_1","output":"ok"}
+		]
+	}`)
+
+	out := TranslateRequest(FormatOpenAIResponse, FormatGemini, "gemini-3-flash", raw, false)
+	contents := gjson.GetBytes(out, "contents").Array()
+	if len(contents) != 3 {
+		t.Fatalf("contents length = %d, want leading user, model call, function response; output=%s", len(contents), out)
+	}
+	if !contents[2].Get("parts.0.functionResponse").Exists() {
+		t.Fatalf("last turn should remain functionResponse without trailing empty user: %s", out)
+	}
+}
+
 func TestUpstreamResponsesToAntigravityToolResultImageAttachesToFunctionResponse(t *testing.T) {
 	raw := []byte(`{
 		"model":"gemini-3-flash",
@@ -366,6 +454,56 @@ func TestUpstreamResponsesToAntigravityToolResultImageAttachesToFunctionResponse
 	}
 	if gjson.GetBytes(out, "request.contents.2.parts.1.inlineData").Exists() {
 		t.Fatalf("Antigravity image remained as sibling instead of functionResponse.parts: %s", out)
+	}
+}
+
+func TestUpstreamResponsesToAntigravityToolChoiceNoneOmitsTools(t *testing.T) {
+	for _, toolChoice := range []string{`"none"`, `{"type":"none"}`} {
+		t.Run(toolChoice, func(t *testing.T) {
+			raw := []byte(`{
+				"model":"gemini-pro-agent",
+				"input":[{"role":"user","content":[{"type":"input_text","text":"hi"}]}],
+				"tools":[{"type":"function","name":"run","parameters":{"type":"object"}}],
+				"tool_choice":` + toolChoice + `
+			}`)
+
+			out := TranslateRequest(FormatOpenAIResponse, FormatAntigravity, "gemini-pro-agent", raw, false)
+			if gjson.GetBytes(out, "request.tools").Exists() {
+				t.Fatalf("tools should be omitted when tool_choice is none; output=%s", out)
+			}
+			if got := gjson.GetBytes(out, "request.toolConfig.functionCallingConfig.mode").String(); got != "NONE" {
+				t.Fatalf("functionCallingConfig.mode = %q, want NONE; output=%s", got, out)
+			}
+		})
+	}
+}
+
+func TestUpstreamResponsesToAntigravityReasoningEffortEnablesSummary(t *testing.T) {
+	raw := []byte(`{
+		"model":"gemini-pro-agent",
+		"reasoning":{"effort":"high"},
+		"input":[{"role":"user","content":[{"type":"input_text","text":"hi"}]}]
+	}`)
+
+	out := TranslateRequest(FormatOpenAIResponse, FormatAntigravity, "gemini-pro-agent", raw, false)
+	if got := gjson.GetBytes(out, "request.generationConfig.thinkingConfig.includeThoughts"); !got.Exists() || !got.Bool() {
+		t.Fatalf("includeThoughts = %s, want true; output=%s", got.Raw, out)
+	}
+	if got := gjson.GetBytes(out, "request.generationConfig.thinkingConfig.thinkingLevel").String(); got != "high" {
+		t.Fatalf("thinkingLevel = %q, want high; output=%s", got, out)
+	}
+}
+
+func TestUpstreamResponsesToAntigravityExplicitSummaryNullOverridesEffort(t *testing.T) {
+	raw := []byte(`{
+		"model":"gemini-pro-agent",
+		"reasoning":{"effort":"high","summary":null},
+		"input":[{"role":"user","content":[{"type":"input_text","text":"hi"}]}]
+	}`)
+
+	out := TranslateRequest(FormatOpenAIResponse, FormatAntigravity, "gemini-pro-agent", raw, false)
+	if got := gjson.GetBytes(out, "request.generationConfig.thinkingConfig.includeThoughts"); !got.Exists() || got.Bool() {
+		t.Fatalf("includeThoughts = %s, want explicit false override; output=%s", got.Raw, out)
 	}
 }
 

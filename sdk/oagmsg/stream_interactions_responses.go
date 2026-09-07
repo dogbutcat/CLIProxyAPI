@@ -77,6 +77,8 @@ type responsesAPISerializer struct {
 	seenSignatures        map[string]bool
 	lastSemanticKind      string
 	messageSignature      string
+	lastMessageID         string
+	lastMessageText       string
 	// Tool output item tracking.
 	toolOutputIdxByCallID map[string]int
 	toolItemAdded         map[string]bool
@@ -809,12 +811,18 @@ func (s *responsesAPISerializer) closeMessageItem() [][]byte {
 	out = append(out, s.closeMessageContentPart()...)
 	if s.msgItemAdded {
 		signature := s.messageSignature
+		messageID := s.msgItemID
+		messageText := s.msgText.String()
 		out = append(out, s.emitMessageOutputItemDone(s.outputItemStatus()))
 		s.msgItemAdded = false
 		s.messageSignature = ""
 		if signature != "" {
-			out = append(out, s.emitDetachedReasoning(signature, geminiResponsesCarrierPrevious, geminiResponsesCarrierText)...)
+			if !s.cacheTrailingTextSignatures(messageID, messageText, []string{signature}) {
+				out = append(out, s.emitDetachedReasoning(signature, geminiResponsesCarrierPrevious, geminiResponsesCarrierText)...)
+			}
 		}
+		s.lastMessageID = messageID
+		s.lastMessageText = messageText
 	}
 	s.msgText.Reset()
 	return out
@@ -895,7 +903,12 @@ func (s *responsesAPISerializer) flushPendingTerminalSignature() [][]byte {
 		return out
 	}
 	if s.msgItemAdded {
+		messageID := s.msgItemID
+		messageText := s.msgText.String()
 		out = append(out, s.closeMessageItem()...)
+		if s.cacheTrailingTextSignatures(messageID, messageText, signatures) {
+			return out
+		}
 		for _, signature := range signatures {
 			out = append(out, s.emitDetachedReasoning(signature, geminiResponsesCarrierPrevious, geminiResponsesCarrierText)...)
 		}
@@ -907,6 +920,11 @@ func (s *responsesAPISerializer) flushPendingTerminalSignature() [][]byte {
 		direction, target = geminiResponsesCarrierPrevious, geminiResponsesCarrierFunction
 	case geminiResponsesCarrierText:
 		direction, target = geminiResponsesCarrierPrevious, geminiResponsesCarrierText
+	}
+	if direction == geminiResponsesCarrierPrevious &&
+		target == geminiResponsesCarrierText &&
+		s.cacheTrailingTextSignatures(s.lastMessageID, s.lastMessageText, signatures) {
+		return nil
 	}
 	for _, signature := range signatures {
 		out = append(out, s.emitDetachedReasoning(signature, direction, target)...)
@@ -941,6 +959,19 @@ func (s *responsesAPISerializer) flushPendingSignatures(direction, targetKind st
 		out = append(out, s.emitDetachedReasoning(signature, direction, targetKind)...)
 	}
 	return out
+}
+
+func (s *responsesAPISerializer) cacheTrailingTextSignatures(messageID, text string, signatures []string) bool {
+	if !s.geminiMode || !cacheGeminiResponsesTextSignatures(s.model, messageID, text, signatures) {
+		return false
+	}
+	for _, signature := range signatures {
+		normalized, ok := compatibleGeminiResponsesCarrierSignature(signature, geminiResponsesCarrierText)
+		if ok {
+			s.seenSignatures[normalized] = true
+		}
+	}
+	return true
 }
 
 func (s *responsesAPISerializer) emitMessageOutputItemDone(status string) []byte {
