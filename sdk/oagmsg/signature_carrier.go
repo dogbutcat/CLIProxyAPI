@@ -185,6 +185,152 @@ func rawGJSONResultArray(items []gjson.Result) []byte {
 	return []byte(builder.String())
 }
 
+func geminiMessagesForSerialization(req *UnifiedRequest) []OagMessage {
+	if req == nil {
+		return nil
+	}
+	switch resolveFormat(req.SourceFormat) {
+	case FormatOpenAIResponse, FormatCodex:
+		return applyGeminiResponsesTextCarriers(req.Messages)
+	default:
+		return req.Messages
+	}
+}
+
+func applyGeminiResponsesTextCarriers(messages []OagMessage) []OagMessage {
+	if len(messages) == 0 {
+		return messages
+	}
+	updated := cloneOagMessages(messages)
+	skip := make([]bool, len(updated))
+	changed := false
+	for index, msg := range updated {
+		signature, direction, targetKind, ok := geminiTextCarrierFromMessage(msg)
+		if !ok || targetKind != geminiResponsesCarrierText {
+			continue
+		}
+		switch direction {
+		case geminiResponsesCarrierPrevious:
+			if applyGeminiCarrierToPreviousText(updated, index, signature) {
+				skip[index] = true
+				changed = true
+			}
+		case geminiResponsesCarrierNext:
+			if applyGeminiCarrierToNextText(updated, index, signature) {
+				skip[index] = true
+				changed = true
+			}
+		}
+	}
+	if !changed {
+		return messages
+	}
+	out := make([]OagMessage, 0, len(updated))
+	for index, msg := range updated {
+		if !skip[index] {
+			out = append(out, msg)
+		}
+	}
+	return out
+}
+
+func cloneOagMessages(messages []OagMessage) []OagMessage {
+	out := make([]OagMessage, len(messages))
+	copy(out, messages)
+	for index := range out {
+		out[index].Content = append([]ContentBlock(nil), messages[index].Content...)
+	}
+	return out
+}
+
+func geminiTextCarrierFromMessage(msg OagMessage) (signature, direction, targetKind string, ok bool) {
+	if !strings.EqualFold(msg.Role, "assistant") || len(msg.Content) != 1 {
+		return "", "", "", false
+	}
+	block, ok := msg.Content[0].(ThinkingBlock)
+	if !ok || strings.TrimSpace(block.Thinking) != "" {
+		return "", "", "", false
+	}
+	signature, direction, targetKind, marked, valid := decodeGeminiResponsesCarrier(block.Signature)
+	if !marked || !valid || signature == "" {
+		return "", "", "", false
+	}
+	return signature, direction, targetKind, true
+}
+
+func applyGeminiCarrierToPreviousText(messages []OagMessage, carrierIndex int, signature string) bool {
+	for index := carrierIndex - 1; index >= 0; index-- {
+		if !strings.EqualFold(messages[index].Role, "assistant") {
+			return false
+		}
+		if applyGeminiSignatureToLastTextBlock(&messages[index], signature) {
+			return true
+		}
+		return false
+	}
+	return false
+}
+
+func applyGeminiCarrierToNextText(messages []OagMessage, carrierIndex int, signature string) bool {
+	for index := carrierIndex + 1; index < len(messages); index++ {
+		if !strings.EqualFold(messages[index].Role, "assistant") {
+			return false
+		}
+		if applyGeminiSignatureToFirstTextBlock(&messages[index], signature) {
+			return true
+		}
+		return false
+	}
+	return false
+}
+
+func applyGeminiSignatureToLastTextBlock(msg *OagMessage, signature string) bool {
+	for index := len(msg.Content) - 1; index >= 0; index-- {
+		if applyGeminiSignatureToTextBlock(msg, index, signature) {
+			return true
+		}
+	}
+	return false
+}
+
+func applyGeminiSignatureToFirstTextBlock(msg *OagMessage, signature string) bool {
+	for index := range msg.Content {
+		if applyGeminiSignatureToTextBlock(msg, index, signature) {
+			return true
+		}
+	}
+	return false
+}
+
+func applyGeminiSignatureToTextBlock(msg *OagMessage, index int, signature string) bool {
+	switch block := msg.Content[index].(type) {
+	case TextBlock:
+		if block.Text == "" {
+			return false
+		}
+		raw := map[string]any{"text": block.Text, "thoughtSignature": signature}
+		msg.Content[index] = RawBlock{RawData: raw}
+		return true
+	case RawBlock:
+		text, ok := block.RawData["text"].(string)
+		if !ok || text == "" {
+			return false
+		}
+		if _, exists := block.RawData["thoughtSignature"]; exists {
+			return false
+		}
+		raw := make(map[string]any, len(block.RawData)+1)
+		for key, value := range block.RawData {
+			raw[key] = value
+		}
+		raw["thoughtSignature"] = signature
+		msg.Content[index] = RawBlock{RawData: raw}
+		return true
+	default:
+		return false
+	}
+}
+
 func encodeGeminiResponsesCarrier(rawSignature, direction, targetKind string) string {
 	rawSignature = strings.TrimSpace(rawSignature)
 	if rawSignature == "" {
@@ -313,7 +459,7 @@ func markedResponsesOutputItem(itemJSON []byte) map[string]any {
 	return map[string]any{oagmsgResponsesOutputItemMarker: string(itemJSON)}
 }
 
-func geminiResponseSignatureOutputItems(rawJSON []byte, responseID string) []map[string]any {
+func geminiResponseSignatureOutputItems(modelName string, rawJSON []byte, responseID string) []map[string]any {
 	root := gjson.ParseBytes(rawJSON)
 	if nested := root.Get("response"); nested.Exists() && nested.Get("candidates").Exists() {
 		root = nested
@@ -324,6 +470,7 @@ func geminiResponseSignatureOutputItems(rawJSON []byte, responseID string) []map
 	}
 
 	builder := &geminiSignatureOutputBuilder{
+		modelName:  modelName,
 		responseID: strings.TrimPrefix(responseID, "resp_"),
 		seen:       make(map[string]bool),
 	}
@@ -340,6 +487,7 @@ func geminiResponseSignatureOutputItems(rawJSON []byte, responseID string) []map
 }
 
 type geminiSignatureOutputBuilder struct {
+	modelName  string
 	responseID string
 	nextIndex  int
 	output     []map[string]any
@@ -351,6 +499,8 @@ type geminiSignatureOutputBuilder struct {
 	reasoningSignature string
 	messageText        strings.Builder
 	messageSignature   string
+	lastMessageID      string
+	lastMessageText    string
 	lastSemanticKind   string
 	pendingSignatures  []string
 	requiresCarrier    bool
@@ -429,6 +579,9 @@ func (b *geminiSignatureOutputBuilder) acceptTerminalSignature(signature string)
 	}
 	if b.messageText.Len() > 0 {
 		b.flushMessage()
+		if b.cacheTrailingTextSignatures(signature) {
+			return
+		}
 		b.appendDetached(signature, geminiResponsesCarrierPrevious, geminiResponsesCarrierText)
 		return
 	}
@@ -436,6 +589,9 @@ func (b *geminiSignatureOutputBuilder) acceptTerminalSignature(signature string)
 	case geminiResponsesCarrierFunction:
 		b.appendDetached(signature, geminiResponsesCarrierPrevious, geminiResponsesCarrierFunction)
 	case geminiResponsesCarrierText:
+		if b.cacheTrailingTextSignatures(signature) {
+			return
+		}
 		b.appendDetached(signature, geminiResponsesCarrierPrevious, geminiResponsesCarrierText)
 	default:
 		b.pushPendingSignature(signature)
@@ -471,6 +627,10 @@ func (b *geminiSignatureOutputBuilder) flushPendingTerminalSignatures() {
 	case geminiResponsesCarrierFunction:
 		b.flushPendingSignatures(geminiResponsesCarrierPrevious, geminiResponsesCarrierFunction)
 	case geminiResponsesCarrierText:
+		if b.cacheTrailingTextSignatures(b.pendingSignatures...) {
+			b.pendingSignatures = nil
+			return
+		}
 		b.flushPendingSignatures(geminiResponsesCarrierPrevious, geminiResponsesCarrierText)
 	default:
 		b.flushPendingSignatures(geminiResponsesCarrierStandalone, geminiResponsesCarrierAny)
@@ -511,15 +671,32 @@ func (b *geminiSignatureOutputBuilder) flushMessage() {
 	if b.messageSignature != "" {
 		b.appendDetached(b.messageSignature, geminiResponsesCarrierNext, geminiResponsesCarrierText)
 	}
+	messageID := fmt.Sprintf("msg_%s_%d", b.responseID, b.msgIndex)
+	messageText := b.messageText.String()
 	item := []byte(`{"id":"","type":"message","status":"completed","role":"assistant","content":[{"type":"output_text","text":"","annotations":[],"logprobs":[]}]}`)
-	item, _ = sjson.SetBytes(item, "id", fmt.Sprintf("msg_%s_%d", b.responseID, b.msgIndex))
-	item, _ = sjson.SetBytes(item, "content.0.text", b.messageText.String())
+	item, _ = sjson.SetBytes(item, "id", messageID)
+	item, _ = sjson.SetBytes(item, "content.0.text", messageText)
 	b.output = append(b.output, markedResponsesOutputItem(item))
+	b.lastMessageID = messageID
+	b.lastMessageText = messageText
 	b.messageText.Reset()
 	b.messageSignature = ""
 	b.msgIndex++
 	b.nextIndex++
 	b.lastSemanticKind = geminiResponsesCarrierText
+}
+
+func (b *geminiSignatureOutputBuilder) cacheTrailingTextSignatures(signatures ...string) bool {
+	if !cacheGeminiResponsesTextSignatures(b.modelName, b.lastMessageID, b.lastMessageText, signatures) {
+		return false
+	}
+	for _, signature := range signatures {
+		normalized, ok := compatibleGeminiResponsesCarrierSignature(signature, geminiResponsesCarrierText)
+		if ok {
+			b.seen[normalized] = true
+		}
+	}
+	return true
 }
 
 func (b *geminiSignatureOutputBuilder) appendDetached(signature, direction, targetKind string) {

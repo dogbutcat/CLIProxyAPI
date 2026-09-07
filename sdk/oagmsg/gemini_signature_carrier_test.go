@@ -178,8 +178,8 @@ func TestGeminiSignatureCarrierNonStreamMissingRepeatedTerminal(t *testing.T) {
 	raw = []byte(strings.ReplaceAll(string(raw), "terminal-sig", terminalSig))
 	out := TranslateNonStream(context.Background(), FormatGemini, FormatOpenAIResponse, "gemini-test", nil, nil, raw, nil)
 	output := gjson.GetBytes(out, "output").Array()
-	if len(output) != 3 {
-		t.Fatalf("output item count = %d, want 3: %s", len(output), out)
+	if len(output) != 2 {
+		t.Fatalf("output item count = %d, want visible carrier + message: %s", len(output), out)
 	}
 	firstSig, firstDirection, firstTarget := mustDecodeCarrier(t, output[0].Get("encrypted_content").String())
 	if firstSig != sig || firstDirection != geminiResponsesCarrierNext || firstTarget != geminiResponsesCarrierText {
@@ -188,10 +188,7 @@ func TestGeminiSignatureCarrierNonStreamMissingRepeatedTerminal(t *testing.T) {
 	if output[1].Get("type").String() != "message" || output[1].Get("content.0.text").String() != "plainsignedrepeat" {
 		t.Fatalf("message item = %s", output[1].Raw)
 	}
-	gotTerminalSig, terminalDirection, terminalTarget := mustDecodeCarrier(t, output[2].Get("encrypted_content").String())
-	if gotTerminalSig != terminalSig || terminalDirection != geminiResponsesCarrierPrevious || terminalTarget != geminiResponsesCarrierText {
-		t.Fatalf("terminal carrier = %q/%q/%q", gotTerminalSig, terminalDirection, terminalTarget)
-	}
+	assertGeminiTextSignatureReplay(t, output[1], terminalSig)
 	if strings.Count(gjson.GetBytes(out, "output").Raw, sig) > 0 {
 		t.Fatalf("raw signature leaked without carrier envelope: %s", out)
 	}
@@ -238,24 +235,18 @@ func TestGeminiSignatureCarrierStreamAndNonStreamTerminalFunctionParity(t *testi
 
 func TestGeminiSignatureCarrierStreamPureSignatureBeforeText(t *testing.T) {
 	sig := geminiCarrierSig1
-	lines := [][]byte{
-		[]byte(`data: {"responseId":"sig-stream","candidates":[{"content":{"parts":[{"thoughtSignature":"` + sig + `"}]}}]}`),
-		[]byte(`data: {"responseId":"sig-stream","candidates":[{"content":{"parts":[{"text":"answer"}]},"finishReason":"STOP"}]}`),
+	events := translateSignatureStreamEvents(t,
+		`data: {"responseId":"sig-stream","candidates":[{"content":{"parts":[{"thoughtSignature":"`+sig+`"}]}}]}`,
+		`data: {"responseId":"sig-stream","candidates":[{"content":{"parts":[{"text":"answer"}]},"finishReason":"STOP"}]}`,
+	)
+	output := completedOutputFromEvents(t, events)
+	if strings.Join(outputItemTypes(output), ",") != "message" {
+		t.Fatalf("leading stream carrier output malformed: %v", output)
 	}
-	var state any
-	var reasoning gjson.Result
-	for _, raw := range lines {
-		for _, line := range TranslateStream(context.Background(), FormatGemini, FormatOpenAIResponse, "gemini-test", nil, nil, raw, &state) {
-			event, data := parseSignatureSSE(t, line)
-			if event == "response.output_item.done" && data.Get("item.type").String() == "reasoning" {
-				reasoning = data.Get("item")
-			}
-		}
+	if output[0].Get("content.0.text").String() != "answer" {
+		t.Fatalf("leading stream message malformed: %s", output[0].Raw)
 	}
-	gotSig, direction, target := mustDecodeCarrier(t, reasoning.Get("encrypted_content").String())
-	if gotSig != sig || direction != geminiResponsesCarrierPrevious || target != geminiResponsesCarrierText {
-		t.Fatalf("leading stream carrier = %q/%q/%q", gotSig, direction, target)
-	}
+	assertGeminiTextSignatureReplay(t, output[0], sig)
 }
 
 func TestGeminiSignatureCarrierSignedThoughtThenDifferentlySignedVisible(t *testing.T) {
@@ -271,14 +262,14 @@ func TestGeminiSignatureCarrierSignedThoughtThenDifferentlySignedVisible(t *test
 		t.Fatalf("non-stream message item = %s", nonStream[2].Raw)
 	}
 	stream := completedStreamOutput(t, raw)
-	if strings.Join(outputItemTypes(stream), ",") != "reasoning,message,reasoning" {
+	if strings.Join(outputItemTypes(stream), ",") != "reasoning,message" {
 		t.Fatalf("stream output item order malformed: %v", stream)
 	}
 	assertCarrier(t, stream[0], geminiCarrierSig1, geminiResponsesCarrierStandalone, geminiResponsesCarrierText)
-	assertCarrier(t, stream[2], sig2, geminiResponsesCarrierPrevious, geminiResponsesCarrierText)
 	if stream[1].Get("content.0.text").String() != "answer" {
 		t.Fatalf("stream message item = %s", stream[1].Raw)
 	}
+	assertGeminiTextSignatureReplay(t, stream[1], sig2)
 }
 
 func TestGeminiSignatureCarrierLeadingCarrierDoesNotCrossSignedThought(t *testing.T) {
@@ -331,16 +322,15 @@ func TestGeminiSignatureCarrierStrippedReasoningIDsKeepCarrierBinding(t *testing
 	out := TranslateNonStream(context.Background(), FormatGemini, FormatOpenAIResponse, "gemini-test", nil, nil, raw, nil)
 	output := []byte(gjson.GetBytes(out, "output").Raw)
 	output, _ = sjson.DeleteBytes(output, "0.id")
-	output, _ = sjson.DeleteBytes(output, "2.id")
 	stripped := gjson.ParseBytes(output).Array()
+	if len(stripped) != 2 {
+		t.Fatalf("stripped output item count = %d, want visible carrier + message: %s", len(stripped), output)
+	}
 	firstSig, firstDirection, firstTarget := mustDecodeCarrier(t, stripped[0].Get("encrypted_content").String())
-	secondSig, secondDirection, secondTarget := mustDecodeCarrier(t, stripped[2].Get("encrypted_content").String())
 	if firstSig != geminiCarrierSig1 || firstDirection != geminiResponsesCarrierNext || firstTarget != geminiResponsesCarrierText {
 		t.Fatalf("stripped first carrier = %q/%q/%q", firstSig, firstDirection, firstTarget)
 	}
-	if secondSig != sig2 || secondDirection != geminiResponsesCarrierPrevious || secondTarget != geminiResponsesCarrierText {
-		t.Fatalf("stripped terminal carrier = %q/%q/%q", secondSig, secondDirection, secondTarget)
-	}
+	assertGeminiTextSignatureReplay(t, stripped[1], sig2)
 }
 
 func TestGeminiSignatureCarrierLateThoughtSignatureImmutable(t *testing.T) {
@@ -528,14 +518,14 @@ func TestGeminiSignatureCarrierDirectG6Fixtures(t *testing.T) {
 		assertStreamLifecycleContiguousAndStable(t, events)
 		output := completedOutputFromEvents(t, events)
 		assertUniqueCompletedItemIDs(t, output)
-		if strings.Join(outputItemTypes(output), ",") != "message,reasoning,message,reasoning" {
+		if strings.Join(outputItemTypes(output), ",") != "message,message" {
 			t.Fatalf("stream consecutive visible order malformed: %v", output)
 		}
-		assertCarrier(t, output[1], geminiCarrierSig1, geminiResponsesCarrierPrevious, geminiResponsesCarrierText)
-		assertCarrier(t, output[3], sig2, geminiResponsesCarrierPrevious, geminiResponsesCarrierText)
-		if output[0].Get("content.0.text").String() != "ab" || output[2].Get("content.0.text").String() != "c" {
+		if output[0].Get("content.0.text").String() != "ab" || output[1].Get("content.0.text").String() != "c" {
 			t.Fatalf("stream consecutive visible text malformed: %v", output)
 		}
+		assertGeminiTextSignatureReplay(t, output[0], geminiCarrierSig1)
+		assertGeminiTextSignatureReplay(t, output[1], sig2)
 	})
 
 	t.Run("nonstream_consecutive_signed_visible_text", func(t *testing.T) {
@@ -560,13 +550,13 @@ func TestGeminiSignatureCarrierDirectG6Fixtures(t *testing.T) {
 		assertStreamLifecycleContiguousAndStable(t, events)
 		output := completedOutputFromEvents(t, events)
 		assertUniqueCompletedItemIDs(t, output)
-		if strings.Join(outputItemTypes(output), ",") != "message,reasoning,message" {
+		if strings.Join(outputItemTypes(output), ",") != "message,message" {
 			t.Fatalf("stream signed/unsigned order malformed: %v", output)
 		}
-		if output[0].Get("content.0.text").String() != "signed" || output[2].Get("content.0.text").String() != "unsigned" {
+		if output[0].Get("content.0.text").String() != "signed" || output[1].Get("content.0.text").String() != "unsigned" {
 			t.Fatalf("stream signed/unsigned text malformed: %v", output)
 		}
-		assertCarrier(t, output[1], geminiCarrierSig1, geminiResponsesCarrierPrevious, geminiResponsesCarrierText)
+		assertGeminiTextSignatureReplay(t, output[0], geminiCarrierSig1)
 	})
 
 	t.Run("nonstream_trailing_signature_follows_pending_reasoning", func(t *testing.T) {
@@ -616,14 +606,14 @@ func TestGeminiSignatureCarrierDirectG6Fixtures(t *testing.T) {
 			`data: {"response":{"responseId":"leading-empty-signed-text","candidates":[{"content":{"parts":[{"text":"answer","thoughtSignature":"`+sig2+`"}]},"finishReason":"STOP"}]}}`,
 		)
 		assertUniqueCompletedItemIDs(t, output)
-		if strings.Join(outputItemTypes(output), ",") != "reasoning,message,reasoning" {
+		if strings.Join(outputItemTypes(output), ",") != "reasoning,message" {
 			t.Fatalf("leading empty/signed text order malformed: %v", output)
 		}
 		assertCarrier(t, output[0], geminiCarrierSig1, geminiResponsesCarrierStandalone, geminiResponsesCarrierAny)
-		assertCarrier(t, output[2], sig2, geminiResponsesCarrierPrevious, geminiResponsesCarrierText)
 		if output[1].Get("content.0.text").String() != "answer" {
 			t.Fatalf("signed text message malformed: %v", output)
 		}
+		assertGeminiTextSignatureReplay(t, output[1], sig2)
 	})
 
 	t.Run("stream_multiple_leading_empty_signatures", func(t *testing.T) {
@@ -663,15 +653,15 @@ func TestGeminiSignatureCarrierDirectG6Fixtures(t *testing.T) {
 		assertStreamLifecycleContiguousAndStable(t, events)
 		output := completedOutputFromEvents(t, events)
 		assertUniqueCompletedItemIDs(t, output)
-		if strings.Join(outputItemTypes(output), ",") != "reasoning,message,reasoning,reasoning" {
+		if strings.Join(outputItemTypes(output), ",") != "reasoning,message,reasoning" {
 			t.Fatalf("visible-before-thought order malformed: %v", output)
 		}
 		assertCarrier(t, output[0], geminiCarrierSig1, geminiResponsesCarrierStandalone, geminiResponsesCarrierText)
-		assertCarrier(t, output[2], sig2, geminiResponsesCarrierPrevious, geminiResponsesCarrierText)
-		assertCarrier(t, output[3], sig3, geminiResponsesCarrierStandalone, geminiResponsesCarrierText)
-		if output[1].Get("content.0.text").String() != "answer" || output[3].Get("summary.0.text").String() != "thought-c" {
+		assertCarrier(t, output[2], sig3, geminiResponsesCarrierStandalone, geminiResponsesCarrierText)
+		if output[1].Get("content.0.text").String() != "answer" || output[2].Get("summary.0.text").String() != "thought-c" {
 			t.Fatalf("visible signature crossed later thought: %v", output)
 		}
+		assertGeminiTextSignatureReplay(t, output[1], sig2)
 	})
 
 	t.Run("stream_signed_text_before_signed_function", func(t *testing.T) {
@@ -684,19 +674,19 @@ func TestGeminiSignatureCarrierDirectG6Fixtures(t *testing.T) {
 		assertStreamLifecycleContiguousAndStable(t, events)
 		output := completedOutputFromEvents(t, events)
 		assertUniqueCompletedItemIDs(t, output)
-		if strings.Join(outputItemTypes(output), ",") != "message,reasoning,reasoning,function_call" {
+		if strings.Join(outputItemTypes(output), ",") != "message,reasoning,function_call" {
 			t.Fatalf("signed text/function order malformed: %v", output)
 		}
-		assertCarrier(t, output[1], geminiCarrierSig1, geminiResponsesCarrierPrevious, geminiResponsesCarrierText)
-		assertCarrier(t, output[2], toolSig, geminiResponsesCarrierNext, geminiResponsesCarrierFunction)
-		callID := output[3].Get("call_id").String()
+		assertCarrier(t, output[1], toolSig, geminiResponsesCarrierNext, geminiResponsesCarrierFunction)
+		callID := output[2].Get("call_id").String()
 		if output[0].Get("content.0.text").String() != "before tool" ||
 			!strings.HasPrefix(callID, "call_") ||
-			output[3].Get("id").String() != "fc_"+callID ||
-			output[3].Get("name").String() != "run_command" ||
-			output[3].Get("arguments").String() != `{"command":"true"}` {
+			output[2].Get("id").String() != "fc_"+callID ||
+			output[2].Get("name").String() != "run_command" ||
+			output[2].Get("arguments").String() != `{"command":"true"}` {
 			t.Fatalf("signed text/function fields malformed: %v", output)
 		}
+		assertGeminiTextSignatureReplay(t, output[0], geminiCarrierSig1)
 	})
 
 	t.Run("nonstream_text_around_signed_function", func(t *testing.T) {
@@ -726,13 +716,13 @@ func TestGeminiSignatureCarrierDirectG6Fixtures(t *testing.T) {
 				completed = evt.data.Get("response.output").Array()
 			}
 		}
-		if strings.Join(doneTypes, ",") != "message,reasoning" || strings.Join(outputItemTypes(completed), ",") != "message,reasoning" {
+		if strings.Join(doneTypes, ",") != "message" || strings.Join(outputItemTypes(completed), ",") != "message" {
 			t.Fatalf("detached stream order malformed: done=%v completed=%v", doneTypes, completed)
 		}
 		if completed[0].Get("content.0.text").String() != "visible answer" {
 			t.Fatalf("detached visible message malformed: %v", completed)
 		}
-		assertCarrier(t, completed[1], geminiCarrierSig1, geminiResponsesCarrierPrevious, geminiResponsesCarrierText)
+		assertGeminiTextSignatureReplay(t, completed[0], geminiCarrierSig1)
 	})
 }
 
@@ -1067,6 +1057,33 @@ func assertCarrier(t *testing.T, item gjson.Result, wantSignature, wantDirection
 	if gotSignature != wantSignature || gotDirection != wantDirection || gotTarget != wantTarget {
 		t.Fatalf("carrier = %q/%q/%q, want %q/%q/%q; item=%s", gotSignature, gotDirection, gotTarget, wantSignature, wantDirection, wantTarget, item.Raw)
 	}
+}
+
+func assertGeminiTextSignatureReplay(t *testing.T, message gjson.Result, wantSignature string) {
+	t.Helper()
+	messageID := message.Get("id").String()
+	text := message.Get("content.0.text").String()
+	if messageID == "" || text == "" {
+		t.Fatalf("message must carry id and visible text for replay: %s", message.Raw)
+	}
+	request := []byte(`{
+		"model":"gemini-test",
+		"input":[
+			{"type":"message","role":"assistant","content":[{"type":"output_text","text":""}]},
+			{"type":"message","role":"user","content":[{"type":"input_text","text":"next"}]}
+		]
+	}`)
+	request, _ = sjson.SetBytes(request, "input.0.id", messageID)
+	request, _ = sjson.SetBytes(request, "input.0.content.0.text", text)
+	replayed := TranslateRequest(FormatOpenAIResponse, FormatGemini, "gemini-test", request, false)
+	for _, content := range gjson.GetBytes(replayed, "contents").Array() {
+		for _, part := range content.Get("parts").Array() {
+			if part.Get("text").String() == text && part.Get("thoughtSignature").String() == wantSignature {
+				return
+			}
+		}
+	}
+	t.Fatalf("cached text signature was not restored to Gemini request: %s", replayed)
 }
 
 func joinLines(lines [][]byte) string {

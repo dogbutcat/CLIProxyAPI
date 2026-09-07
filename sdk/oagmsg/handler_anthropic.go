@@ -197,19 +197,18 @@ func alignAnthropicToolResults(blocks []ContentBlock, toolUseIDs []string) []Con
 		return blocks
 	}
 	toolResults := make([]ToolResultBlock, 0, len(toolUseIDs))
-	otherBlocks := make([]ContentBlock, 0, len(blocks))
-	for _, block := range blocks {
+	toolResultIndices := make([]int, 0, len(toolUseIDs))
+	for i, block := range blocks {
 		if toolResult, ok := block.(ToolResultBlock); ok {
 			toolResults = append(toolResults, toolResult)
-			continue
+			toolResultIndices = append(toolResultIndices, i)
 		}
-		otherBlocks = append(otherBlocks, block)
 	}
 	if len(toolResults) != len(toolUseIDs) {
 		return blocks
 	}
 
-	ordered := make([]ContentBlock, 0, len(blocks))
+	reorderedResults := make([]ToolResultBlock, 0, len(toolUseIDs))
 	used := make([]bool, len(toolResults))
 	for _, toolUseID := range toolUseIDs {
 		match := -1
@@ -223,9 +222,15 @@ func alignAnthropicToolResults(blocks []ContentBlock, toolUseIDs []string) []Con
 			return blocks
 		}
 		used[match] = true
-		ordered = append(ordered, toolResults[match])
+		reorderedResults = append(reorderedResults, toolResults[match])
 	}
-	return append(ordered, otherBlocks...)
+
+	ordered := make([]ContentBlock, len(blocks))
+	copy(ordered, blocks)
+	for i, slotIndex := range toolResultIndices {
+		ordered[slotIndex] = reorderedResults[i]
+	}
+	return ordered
 }
 
 func anthropicToolUseIDs(blocks []ContentBlock) []string {
