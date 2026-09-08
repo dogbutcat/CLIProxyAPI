@@ -386,6 +386,18 @@ func usageHasCacheCreation(u *UnifiedUsage) bool {
 	return u != nil && (u.usagePresence.CacheCreation || !hasUsageMetadata(u) && u.CacheCreationInputTokens != 0)
 }
 
+func usageHasResponsesCacheWrite(u *UnifiedUsage) bool {
+	if !usageHasCacheCreation(u) {
+		return false
+	}
+	switch resolveFormat(u.usageOrigin) {
+	case FormatCodex, FormatOpenAIResponse:
+		return true
+	default:
+		return false
+	}
+}
+
 func usageHasCacheRead(u *UnifiedUsage) bool {
 	return u != nil && (u.usagePresence.CacheRead || !hasUsageMetadata(u) && u.CacheReadInputTokens != 0)
 }
