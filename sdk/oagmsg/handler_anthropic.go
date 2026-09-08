@@ -801,6 +801,18 @@ func (h *AnthropicHandler) SerializeRequest(req *UnifiedRequest) ([]byte, error)
 		messages = append(messages, serialized)
 	}
 
+	if formatInstruction := anthropicStructuredOutputInstruction(req.ResponseFormat); formatInstruction != "" {
+		systemBlocks = append(systemBlocks, map[string]any{"type": "text", "text": formatInstruction})
+	}
+	if len(messages) == 0 && len(systemBlocks) > 0 {
+		messages = append(messages, map[string]any{
+			"role": "user",
+			"content": []any{
+				map[string]any{"type": "text", "text": ""},
+			},
+		})
+	}
+
 	if len(systemBlocks) == 1 {
 		if sb, ok := systemBlocks[0].(map[string]any); ok {
 			if sb["cache_control"] == nil {
@@ -822,6 +834,63 @@ func (h *AnthropicHandler) SerializeRequest(req *UnifiedRequest) ([]byte, error)
 		}
 	}
 	return json.Marshal(out)
+}
+
+func anthropicStructuredOutputInstruction(format map[string]any) string {
+	if len(format) == 0 {
+		return ""
+	}
+	formatType, _ := format["type"].(string)
+	switch strings.ToLower(strings.TrimSpace(formatType)) {
+	case "json_object":
+		return anthropicJSONOutputInstruction()
+	case "json_schema":
+		jsonSchema, _ := format["json_schema"].(map[string]any)
+		schema, ok := jsonSchema["schema"]
+		if !ok {
+			schema = format["schema"]
+		}
+		if schema == nil {
+			return anthropicJSONOutputInstruction()
+		}
+		var builder strings.Builder
+		builder.WriteString("You must format your entire response as valid JSON that conforms strictly to the following JSON schema:\n")
+		if name := structuredOutputString(jsonSchema["name"], format["name"]); name != "" {
+			builder.WriteString("Schema Name: ")
+			builder.WriteString(name)
+			builder.WriteString("\n")
+		}
+		if desc := structuredOutputString(jsonSchema["description"], format["description"]); desc != "" {
+			builder.WriteString("Schema Description: ")
+			builder.WriteString(desc)
+			builder.WriteString("\n")
+		}
+		rawSchema, err := json.Marshal(schema)
+		if err != nil || len(rawSchema) == 0 {
+			return anthropicJSONOutputInstruction()
+		}
+		builder.WriteString("JSON Schema:\n")
+		builder.Write(rawSchema)
+		builder.WriteString("\nDo not include any explanations, markdown code blocks (such as ```json), or any text outside of the JSON object.")
+		return builder.String()
+	default:
+		return ""
+	}
+}
+
+func anthropicJSONOutputInstruction() string {
+	return "You must format your entire response as a valid JSON object. Do not include any explanations, markdown code blocks (such as ```json), or any text outside of the JSON object."
+}
+
+func structuredOutputString(values ...any) string {
+	for _, value := range values {
+		if text, ok := value.(string); ok {
+			if trimmed := strings.TrimSpace(text); trimmed != "" {
+				return trimmed
+			}
+		}
+	}
+	return ""
 }
 
 func anthropicSpeedForRequest(req *UnifiedRequest) (string, bool) {

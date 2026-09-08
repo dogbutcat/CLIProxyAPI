@@ -2,9 +2,12 @@ package oagmsg
 
 import (
 	"encoding/json"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	"strconv"
 	"strings"
+
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
+	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 )
 
 const codexToolNameLimitBytes = 64
@@ -102,6 +105,7 @@ func buildCodexShortNameMap(names []string) map[string]string {
 }
 
 func shortenCodexToolNameBase(name string) string {
+	name = sanitizeCodexToolName(name)
 	if len(name) <= codexToolNameLimitBytes {
 		return name
 	}
@@ -115,6 +119,29 @@ func shortenCodexToolNameBase(name string) string {
 		}
 	}
 	return name[:codexToolNameLimitBytes]
+}
+
+func sanitizeCodexToolName(name string) string {
+	if name == "" {
+		return ""
+	}
+	var builder strings.Builder
+	builder.Grow(len(name))
+	for _, r := range name {
+		switch {
+		case r >= 'a' && r <= 'z':
+			builder.WriteRune(r)
+		case r >= 'A' && r <= 'Z':
+			builder.WriteRune(r)
+		case r >= '0' && r <= '9':
+			builder.WriteRune(r)
+		case r == '_' || r == '-':
+			builder.WriteRune(r)
+		default:
+			builder.WriteByte('_')
+		}
+	}
+	return builder.String()
 }
 
 func makeUniqueCodexToolName(base string, used map[string]struct{}) string {
@@ -148,10 +175,10 @@ func reverseStringMap(forward map[string]string) map[string]string {
 
 func applyCodexRequestToolMetadata(body []byte, metadata requestToolMetadata) ([]byte, error) {
 	if len(metadata.toolNameForward) == 0 && len(metadata.customToolNames) == 0 {
-		return body, nil
+		return applyCodexFunctionToolStrictDefaults(body), nil
 	}
 	if !codexRequestNeedsToolMetadata(body) {
-		return body, nil
+		return applyCodexFunctionToolStrictDefaults(body), nil
 	}
 	var root map[string]any
 	if err := json.Unmarshal(body, &root); err != nil {
@@ -160,7 +187,11 @@ func applyCodexRequestToolMetadata(body []byte, metadata requestToolMetadata) ([
 	applyCodexMetadataToToolDeclarations(root, metadata)
 	applyCodexMetadataToToolChoice(root, metadata)
 	applyCodexMetadataToInputHistory(root, metadata)
-	return json.Marshal(root)
+	updated, err := json.Marshal(root)
+	if err != nil {
+		return nil, err
+	}
+	return applyCodexFunctionToolStrictDefaults(updated), nil
 }
 
 func codexRequestNeedsToolMetadata(body []byte) bool {
@@ -186,6 +217,40 @@ func codexRequestNeedsToolMetadata(body []byte) bool {
 		}
 	}
 	return false
+}
+
+func applyCodexFunctionToolStrictDefaults(body []byte) []byte {
+	updated := applyCodexFunctionToolStrictDefaultsAtPath(body, "tools", gjson.GetBytes(body, "tools"))
+	input := gjson.GetBytes(updated, "input")
+	if !input.IsArray() {
+		return updated
+	}
+	for inputIndex, item := range input.Array() {
+		tools := item.Get("tools")
+		if !tools.IsArray() {
+			continue
+		}
+		updated = applyCodexFunctionToolStrictDefaultsAtPath(updated, "input."+strconv.Itoa(inputIndex)+".tools", tools)
+	}
+	return updated
+}
+
+func applyCodexFunctionToolStrictDefaultsAtPath(body []byte, path string, tools gjson.Result) []byte {
+	if !tools.IsArray() {
+		return body
+	}
+	updated := body
+	for index, tool := range tools.Array() {
+		if tool.Get("type").String() != "function" || tool.Get("strict").Exists() {
+			continue
+		}
+		next, err := sjson.SetBytes(updated, path+"."+strconv.Itoa(index)+".strict", false)
+		if err != nil {
+			continue
+		}
+		updated = next
+	}
+	return updated
 }
 
 func applyCodexMetadataToToolDeclarations(root map[string]any, metadata requestToolMetadata) {

@@ -472,6 +472,7 @@ func geminiResponseSignatureOutputItems(modelName string, rawJSON []byte, respon
 	builder := &geminiSignatureOutputBuilder{
 		modelName:  modelName,
 		responseID: strings.TrimPrefix(responseID, "resp_"),
+		modelName:  modelName,
 		seen:       make(map[string]bool),
 	}
 	for _, part := range parts.Array() {
@@ -489,6 +490,7 @@ func geminiResponseSignatureOutputItems(modelName string, rawJSON []byte, respon
 type geminiSignatureOutputBuilder struct {
 	modelName  string
 	responseID string
+	modelName  string
 	nextIndex  int
 	output     []map[string]any
 	seen       map[string]bool

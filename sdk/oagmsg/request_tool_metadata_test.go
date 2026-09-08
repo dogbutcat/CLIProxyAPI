@@ -15,6 +15,7 @@ func TestCodexShortNameMapMatchesPinnedForwardBehavior(t *testing.T) {
 	mcpLong := "mcp__" + strings.Repeat("server_", 10) + "__run"
 	mcpLastLong := "mcp__server__" + strings.Repeat("z", limit+8)
 	collidingLong := strings.Repeat("a", limit) + "_tail"
+	invalidName := "mcp.server/list.tools"
 
 	forward := buildCodexShortNameMap([]string{
 		alreadyShort,
@@ -22,6 +23,7 @@ func TestCodexShortNameMapMatchesPinnedForwardBehavior(t *testing.T) {
 		mcpLong,
 		mcpLastLong,
 		collidingLong,
+		invalidName,
 	})
 
 	if got := forward[alreadyShort]; got != alreadyShort {
@@ -38,6 +40,9 @@ func TestCodexShortNameMapMatchesPinnedForwardBehavior(t *testing.T) {
 	}
 	if got := forward[collidingLong]; got != strings.Repeat("a", limit-2)+"_1" {
 		t.Fatalf("collision = %q, want suffixed re-truncation", got)
+	}
+	if got := forward[invalidName]; got != "mcp_server_list_tools" {
+		t.Fatalf("invalid chars = %q, want sanitized Codex tool name", got)
 	}
 	assertForwardReverseBijection(t, forward, reverseStringMap(forward))
 }

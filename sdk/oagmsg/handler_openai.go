@@ -935,6 +935,9 @@ func (h *OpenAIHandler) FormatResponse(resp *UnifiedResponse, model string) ([]b
 		}
 		if usageHasCacheCreation(resp.Usage) {
 			promptDetails["cached_creation_tokens"] = resp.Usage.CacheCreationInputTokens
+			if usageHasResponsesCacheWrite(resp.Usage) {
+				promptDetails["cache_write_tokens"] = resp.Usage.CacheCreationInputTokens
+			}
 		}
 		if len(promptDetails) > 0 {
 			usageMap["prompt_tokens_details"] = promptDetails

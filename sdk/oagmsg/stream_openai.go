@@ -313,6 +313,9 @@ func (s *openaiStreamSerializer) usageChunk(delta StreamDelta) []byte {
 	}
 	if usageHasCacheCreation(delta.Usage) {
 		tmpl, _ = sjson.SetBytes(tmpl, "usage.prompt_tokens_details.cached_creation_tokens", delta.Usage.CacheCreationInputTokens)
+		if usageHasResponsesCacheWrite(delta.Usage) {
+			tmpl, _ = sjson.SetBytes(tmpl, "usage.prompt_tokens_details.cache_write_tokens", delta.Usage.CacheCreationInputTokens)
+		}
 	}
 	if usageHasReasoning(delta.Usage) {
 		tmpl, _ = sjson.SetBytes(tmpl, "usage.completion_tokens_details.reasoning_tokens", delta.Usage.ReasoningTokens)
