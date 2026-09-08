@@ -330,7 +330,10 @@ func (h *AntigravityHandler) parseResponseWithContext(rawJSON []byte, ctx *Trans
 			}, nil
 		}
 	}
-	resp, err := h.ParseResponse(rawJSON)
+	inner := extractAntigravityResponseBody(rawJSON)
+	inner = restoreCpaUsageMetadata(inner)
+	inner = rewriteAntigravityResponseToolNamesToClient(inner)
+	resp, err := h.GeminiHandler.parseResponseWithContext(inner, ctx)
 	if err != nil {
 		return nil, err
 	}

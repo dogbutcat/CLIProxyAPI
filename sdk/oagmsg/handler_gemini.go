@@ -716,7 +716,8 @@ func (h *GeminiHandler) SerializeRequest(req *UnifiedRequest) ([]byte, error) {
 	var systemParts []any
 	var contents []any
 	toolNames := make(map[string]string)
-	for _, msg := range req.Messages {
+	messagesForSerialization := geminiMessagesForSerialization(req)
+	for _, msg := range messagesForSerialization {
 		for _, use := range msg.GetToolUses() {
 			if use.ID != "" && use.Name != "" {
 				toolNames[use.ID] = use.Name
@@ -734,7 +735,7 @@ func (h *GeminiHandler) SerializeRequest(req *UnifiedRequest) ([]byte, error) {
 		pendingSystemDemotions = nil
 	}
 
-	for _, msg := range req.Messages {
+	for _, msg := range messagesForSerialization {
 		if isGeminiSystemRole(msg.Role) {
 			if !hasEncounteredConversation {
 				systemParts = appendGeminiSystemInstructionParts(systemParts, msg)
@@ -850,6 +851,18 @@ func messageHasGeminiToolResult(msg OagMessage) bool {
 
 // ParseResponse parses a non-streaming Gemini generateContent response.
 func (h *GeminiHandler) ParseResponse(rawJSON []byte) (*UnifiedResponse, error) {
+	return h.parseResponse(rawJSON, "")
+}
+
+func (h *GeminiHandler) parseResponseWithContext(rawJSON []byte, ctx *TranslationContext) (*UnifiedResponse, error) {
+	modelName := ""
+	if ctx != nil {
+		modelName = ctx.ModelName
+	}
+	return h.parseResponse(rawJSON, modelName)
+}
+
+func (h *GeminiHandler) parseResponse(rawJSON []byte, modelName string) (*UnifiedResponse, error) {
 	if err := validateJSONObject(rawJSON); err != nil {
 		return nil, err
 	}
@@ -886,7 +899,7 @@ func (h *GeminiHandler) ParseResponse(rawJSON []byte) (*UnifiedResponse, error) 
 		}
 		resp.Content = strings.Join(textParts, "")
 	}
-	if items := geminiResponseSignatureOutputItems(rawJSON, resp.ID); len(items) > 0 {
+	if items := geminiResponseSignatureOutputItems(modelOrExisting(modelName, resp.Model), rawJSON, resp.ID); len(items) > 0 {
 		resp.responsesOutput = items
 	}
 

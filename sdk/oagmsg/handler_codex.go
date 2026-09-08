@@ -49,6 +49,7 @@ func (h *CodexHandler) SerializeRequest(req *UnifiedRequest) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	body = applyCodexFunctionToolStrictDefaults(body)
 	body = applyCodexSourceInstructionsForRequest(req, body)
 	return FinalizeCodexRequest(body), nil
 }

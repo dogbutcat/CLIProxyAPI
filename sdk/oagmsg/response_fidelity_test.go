@@ -544,6 +544,9 @@ func TestUsageParityCodexCacheWriteToOpenAIChatExplicitZero(t *testing.T) {
 	if got := gjson.GetBytes(out, "usage.prompt_tokens_details.cached_creation_tokens"); !got.Exists() || got.Int() != 0 {
 		t.Fatalf("cached_creation_tokens explicit zero missing: %s", string(out))
 	}
+	if got := gjson.GetBytes(out, "usage.prompt_tokens_details.cache_write_tokens"); !got.Exists() || got.Int() != 0 {
+		t.Fatalf("cache_write_tokens explicit zero missing: %s", string(out))
+	}
 
 	var oracleParam any
 	oracleEvent := []byte(`data: {"type":"response.completed","response":` + string(raw) + `}`)
@@ -815,6 +818,7 @@ func TestUsagePresenceProjectionBranches(t *testing.T) {
 	codexToOpenAI := TranslateNonStream(ctx, FormatCodex, FormatOpenAI, "runtime-model", nil, nil, codexRaw, nil)
 	assertJSONIntBytes(t, codexToOpenAI, "usage.prompt_tokens_details.cached_tokens", 30)
 	assertJSONIntBytes(t, codexToOpenAI, "usage.prompt_tokens_details.cached_creation_tokens", 9)
+	assertJSONIntBytes(t, codexToOpenAI, "usage.prompt_tokens_details.cache_write_tokens", 9)
 	assertJSONIntBytes(t, codexToOpenAI, "usage.completion_tokens_details.reasoning_tokens", 5)
 
 	geminiUsageRaw := []byte(`{"responseId":"gem_1","modelVersion":"gemini-upstream","candidates":[{"content":{"role":"model","parts":[{"text":"ok"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":2,"cachedContentTokenCount":4,"thoughtsTokenCount":3}}`)

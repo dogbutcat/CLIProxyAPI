@@ -100,6 +100,7 @@ func TranslateRequestWithOptions[From ~string, To ~string](fromValue From, toVal
 	to := Format(toValue)
 	hooks := currentPluginHooks()
 	body := normalizeResponsesAgentMessagesForTranslation(from, to, rawJSON, options)
+	body = restoreGeminiResponsesTextSignaturesForTarget(from, to, model, body)
 
 	switch translationPath := selectRequestTranslationPath(from, to, model, body, hooks); translationPath {
 	case requestTranslationPathIdentity:
@@ -162,6 +163,22 @@ func TranslateRequestWithOptions[From ~string, To ~string](fromValue From, toVal
 	body = applyCodexRequestMetadataForTarget(to, body, rawJSON)
 	body = applyOpenAIChatCodexRequestDefaults(from, to, body)
 	return finalizeRequestForTarget(to, body, stream)
+}
+
+func restoreGeminiResponsesTextSignaturesForTarget(from, to Format, model string, body []byte) []byte {
+	source := resolveFormat(from)
+	target := resolveFormat(to)
+	if source != FormatOpenAIResponse && source != FormatCodex {
+		return body
+	}
+	if target != FormatGemini && target != FormatAntigravity {
+		return body
+	}
+	replayModel := strings.TrimSpace(model)
+	if replayModel == "" {
+		replayModel = requestModelName(body)
+	}
+	return restoreGeminiResponsesTextSignaturesForRequest(replayModel, body)
 }
 
 func normalizeResponsesAgentMessagesForTranslation(from, to Format, rawJSON []byte, options RequestTranslationOptions) []byte {

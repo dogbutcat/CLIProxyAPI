@@ -3,6 +3,7 @@ package oagmsg
 import (
 	"encoding/json"
 	"reflect"
+	"strings"
 	"testing"
 
 	chat_to_responses "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/openai/interactions/responses"
@@ -148,6 +149,68 @@ func TestOpenAIChatResponseFormatRoundTripPreservation(t *testing.T) {
 	assertResponseFormatEqual(t, gjson.GetBytes(chat, "response_format"), gjson.GetBytes(raw, "response_format"))
 }
 
+func TestAnthropicStructuredOutputInstructionFromResponses(t *testing.T) {
+	raw := []byte(`{
+		"model":"gpt-test",
+		"instructions":"Original system instruction.",
+		"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}],
+		"text":{"format":{
+			"type":"json_schema",
+			"name":"answer",
+			"description":"Structured answer",
+			"schema":{
+				"type":"object",
+				"properties":{"ok":{"type":"boolean"}},
+				"required":["ok"],
+				"additionalProperties":false
+			}
+		}}
+	}`)
+
+	out := TranslateRequest(FormatOpenAIResponse, FormatAnthropic, "claude-sonnet-4-6", raw, false)
+	systemText := anthropicSystemTextForTest(gjson.GetBytes(out, "system"))
+	for _, want := range []string{
+		"Original system instruction.",
+		"valid JSON",
+		"Schema Name: answer",
+		"Structured answer",
+		`"ok"`,
+	} {
+		if !strings.Contains(systemText, want) {
+			t.Fatalf("system instruction missing %q: %s", want, out)
+		}
+	}
+	if got := gjson.GetBytes(out, "messages.#").Int(); got != 1 {
+		t.Fatalf("messages count = %d, want 1: %s", got, out)
+	}
+}
+
+func TestAnthropicStructuredOutputInstructionFromChat(t *testing.T) {
+	raw := []byte(`{
+		"model":"gpt-test",
+		"messages":[
+			{"role":"system","content":"Keep the answer compact."},
+			{"role":"user","content":"hi"}
+		],
+		"response_format":{"type":"json_object"}
+	}`)
+
+	out := TranslateRequest(FormatOpenAI, FormatAnthropic, "claude-sonnet-4-6", raw, false)
+	systemText := anthropicSystemTextForTest(gjson.GetBytes(out, "system"))
+	if !strings.Contains(systemText, "Keep the answer compact.") || !strings.Contains(systemText, "valid JSON object") {
+		t.Fatalf("system instruction should contain original system and json_object instruction: %s", out)
+	}
+}
+
+func TestAnthropicStructuredOutputInstructionSkipsTextFormat(t *testing.T) {
+	raw := []byte(`{"model":"gpt-test","messages":[{"role":"user","content":"hi"}],"response_format":{"type":"text"}}`)
+
+	out := TranslateRequest(FormatOpenAI, FormatAnthropic, "claude-sonnet-4-6", raw, false)
+	if system := gjson.GetBytes(out, "system"); system.Exists() {
+		t.Fatalf("text response_format should not add Anthropic system instruction: %s", out)
+	}
+}
+
 func TestOpenAIChatMaxCompletionTokensToResponses(t *testing.T) {
 	raw := []byte(`{
 		"model":"gpt-test",
@@ -183,4 +246,20 @@ func decodeResponseFormatResult(t *testing.T, result gjson.Result) any {
 		t.Fatalf("decode JSON %s: %v", result.Raw, err)
 	}
 	return value
+}
+
+func anthropicSystemTextForTest(system gjson.Result) string {
+	if system.Type == gjson.String {
+		return system.String()
+	}
+	if !system.IsArray() {
+		return system.Raw
+	}
+	var parts []string
+	for _, block := range system.Array() {
+		if text := block.Get("text").String(); text != "" {
+			parts = append(parts, text)
+		}
+	}
+	return strings.Join(parts, "\n")
 }
