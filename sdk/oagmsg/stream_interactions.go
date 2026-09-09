@@ -381,9 +381,15 @@ func (s *interactionsCodexSerializer) Serialize(delta StreamDelta) [][]byte {
 func (s *interactionsCodexSerializer) Flush() [][]byte {
 	evt := []byte(`{"type":"response.completed","response":{"status":"completed"}}`)
 	if s.usage != nil {
-		evt, _ = sjson.SetBytes(evt, "response.usage.input_tokens", s.usage.PromptTokens)
-		evt, _ = sjson.SetBytes(evt, "response.usage.output_tokens", s.usage.CompletionTokens)
-		evt, _ = sjson.SetBytes(evt, "response.usage.total_tokens", s.usage.TotalTokens)
+		if usageHasPrompt(s.usage) {
+			evt, _ = sjson.SetBytes(evt, "response.usage.input_tokens", usagePromptForTarget(s.usage, FormatOpenAIResponse))
+		}
+		if usageHasCompletion(s.usage) {
+			evt, _ = sjson.SetBytes(evt, "response.usage.output_tokens", usageCompletionForTarget(s.usage, FormatOpenAIResponse))
+		}
+		if total, ok := usageTotalForTarget(s.usage, FormatOpenAIResponse); ok {
+			evt, _ = sjson.SetBytes(evt, "response.usage.total_tokens", total)
+		}
 	}
 	return [][]byte{formatDataLine(evt)}
 }

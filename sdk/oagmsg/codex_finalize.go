@@ -1,7 +1,10 @@
 package oagmsg
 
 import (
+	"bytes"
 	"encoding/json"
+	"strconv"
+	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	"github.com/tidwall/gjson"
@@ -38,8 +41,9 @@ var codexRejectedFields = []string{
 //  8. String input → single user input-message array
 //  9. Strip nested prompt_cache_breakpoint from input content items
 //  10. Downgrade strict JSON schema when optional properties exist
+//  11. Strip schema dialect keywords from tool parameter schemas
 //
-// 11. system→developer role conversion in input array
+// 12. system→developer role conversion in input array
 func FinalizeCodexRequest(body []byte) []byte {
 	// Required boolean fields.
 	body = setCodexBool(body, "store", false)
@@ -67,6 +71,9 @@ func FinalizeCodexRequest(body []byte) []byte {
 
 	// Normalize builtin tools.
 	body = normalizeCodexBuiltinTools(body)
+
+	// Normalize tool parameter schemas for Codex's narrower JSON Schema dialect.
+	body = normalizeCodexToolParameterSchemas(body)
 
 	// Normalize shorthand string input before role validation.
 	body = normalizeCodexStringInput(body)
@@ -127,7 +134,184 @@ func codexRequestAlreadyFinalized(body []byte) bool {
 	if codexStrictJSONSchemaNeedsDowngrade(root) {
 		return false
 	}
+	if codexToolParameterSchemasNeedNormalization(root) {
+		return false
+	}
 	return !codexBuiltinToolsNeedNormalization(root)
+}
+
+type codexToolSchemaUpdate struct {
+	path string
+	raw  []byte
+}
+
+func normalizeCodexToolParameterSchemas(body []byte) []byte {
+	root := util.ParseGJSONBytesNoCopy(body)
+	if !root.IsObject() {
+		return body
+	}
+	var updates []codexToolSchemaUpdate
+	collectCodexToolSchemaUpdates(root.Get("tools"), "tools", &updates)
+	collectCodexToolSchemaUpdates(root.Get("tool_choice.tools"), "tool_choice.tools", &updates)
+	if input := root.Get("input"); input.IsArray() {
+		for inputIdx, item := range input.Array() {
+			collectCodexToolSchemaUpdates(item.Get("tools"), "input."+strconv.Itoa(inputIdx)+".tools", &updates)
+		}
+	}
+	if len(updates) == 0 {
+		return body
+	}
+	out := body
+	for _, update := range updates {
+		if updated, err := sjson.SetRawBytes(out, update.path, update.raw); err == nil {
+			out = updated
+		}
+	}
+	return out
+}
+
+func codexToolParameterSchemasNeedNormalization(root gjson.Result) bool {
+	if !root.IsObject() {
+		return false
+	}
+	var updates []codexToolSchemaUpdate
+	collectCodexToolSchemaUpdates(root.Get("tools"), "tools", &updates)
+	collectCodexToolSchemaUpdates(root.Get("tool_choice.tools"), "tool_choice.tools", &updates)
+	if input := root.Get("input"); input.IsArray() {
+		for inputIdx, item := range input.Array() {
+			collectCodexToolSchemaUpdates(item.Get("tools"), "input."+strconv.Itoa(inputIdx)+".tools", &updates)
+		}
+	}
+	return len(updates) > 0
+}
+
+func collectCodexToolSchemaUpdates(tools gjson.Result, path string, updates *[]codexToolSchemaUpdate) {
+	if !tools.IsArray() || path == "" {
+		return
+	}
+	for toolIdx, tool := range tools.Array() {
+		toolPath := path + "." + strconv.Itoa(toolIdx)
+		if nestedTools := tool.Get("tools"); nestedTools.IsArray() {
+			collectCodexToolSchemaUpdates(nestedTools, toolPath+".tools", updates)
+		}
+		if params := tool.Get("parameters"); params.Exists() {
+			appendCodexToolSchemaUpdate(toolPath+".parameters", params, updates)
+		}
+		if params := tool.Get("function.parameters"); params.Exists() {
+			appendCodexToolSchemaUpdate(toolPath+".function.parameters", params, updates)
+		}
+	}
+}
+
+func appendCodexToolSchemaUpdate(path string, schema gjson.Result, updates *[]codexToolSchemaUpdate) {
+	normalized, changed := normalizeCodexToolParameterSchemaRaw([]byte(schema.Raw))
+	if !changed {
+		return
+	}
+	*updates = append(*updates, codexToolSchemaUpdate{path: path, raw: normalized})
+}
+
+func normalizeCodexToolParameterSchemaRaw(raw []byte) ([]byte, bool) {
+	trimmed := bytes.TrimSpace(raw)
+	var schema any
+	if len(trimmed) == 0 || string(trimmed) == "null" {
+		schema = map[string]any{}
+	} else {
+		decoder := json.NewDecoder(bytes.NewReader(trimmed))
+		decoder.UseNumber()
+		if err := decoder.Decode(&schema); err != nil {
+			schema = map[string]any{}
+		}
+	}
+	root, ok := schema.(map[string]any)
+	if !ok {
+		root = map[string]any{}
+	}
+	normalizeCodexToolParameterSchemaObject(root)
+
+	var buf bytes.Buffer
+	encoder := json.NewEncoder(&buf)
+	encoder.SetEscapeHTML(false)
+	if err := encoder.Encode(root); err != nil {
+		return raw, false
+	}
+	out := bytes.TrimSpace(buf.Bytes())
+	return out, !bytes.Equal(trimmed, out)
+}
+
+func normalizeCodexToolParameterSchemaObject(schema map[string]any) {
+	stripCodexSchemaDialectKeywords(schema)
+	if !codexToolSchemaTypeAllowsObject(schema["type"]) {
+		if _, exists := schema["type"]; !exists {
+			schema["type"] = "object"
+		}
+	}
+	if codexToolSchemaTypeAllowsObject(schema["type"]) {
+		if props, ok := schema["properties"].(map[string]any); !ok || props == nil {
+			schema["properties"] = map[string]any{}
+		}
+	}
+}
+
+func codexToolSchemaTypeAllowsObject(value any) bool {
+	switch typed := value.(type) {
+	case nil:
+		return true
+	case string:
+		return strings.EqualFold(strings.TrimSpace(typed), "object")
+	case []any:
+		for _, item := range typed {
+			if strings.EqualFold(strings.TrimSpace(stringValue(item)), "object") {
+				return true
+			}
+		}
+		return false
+	default:
+		return false
+	}
+}
+
+func stripCodexSchemaDialectKeywords(value any) {
+	switch typed := value.(type) {
+	case map[string]any:
+		delete(typed, "$schema")
+		delete(typed, "$id")
+		if pattern, ok := typed["pattern"].(string); ok && util.HasUnsupportedUnicodePropertyEscape(pattern) {
+			delete(typed, "pattern")
+		}
+		if patternProperties, ok := typed["patternProperties"].(map[string]any); ok {
+			for pattern, child := range patternProperties {
+				if util.HasUnsupportedUnicodePropertyEscape(pattern) {
+					delete(patternProperties, pattern)
+					continue
+				}
+				stripCodexSchemaDialectKeywords(child)
+			}
+		}
+		for _, keyword := range util.SchemaMapKeywords {
+			if keyword == "patternProperties" {
+				continue
+			}
+			children, ok := typed[keyword].(map[string]any)
+			if !ok {
+				continue
+			}
+			for _, child := range children {
+				stripCodexSchemaDialectKeywords(child)
+			}
+		}
+		for _, keyword := range util.SchemaValueKeywords {
+			child, exists := typed[keyword]
+			if !exists {
+				continue
+			}
+			stripCodexSchemaDialectKeywords(child)
+		}
+	case []any:
+		for _, child := range typed {
+			stripCodexSchemaDialectKeywords(child)
+		}
+	}
 }
 
 func downgradeCodexStrictJSONSchema(body []byte) []byte {
@@ -151,34 +335,6 @@ func codexStrictJSONSchemaNeedsDowngrade(root gjson.Result) bool {
 		schema = format.Get("json_schema.schema")
 	}
 	return codexJSONSchemaMissesRequired(schema)
-}
-
-var codexJSONSchemaMapKeywords = [...]string{
-	"properties",
-	"$defs",
-	"definitions",
-	"patternProperties",
-	"dependentSchemas",
-	"dependencies",
-}
-
-var codexJSONSchemaValueKeywords = [...]string{
-	"items",
-	"prefixItems",
-	"contains",
-	"additionalProperties",
-	"propertyNames",
-	"unevaluatedProperties",
-	"unevaluatedItems",
-	"additionalItems",
-	"contentSchema",
-	"anyOf",
-	"oneOf",
-	"allOf",
-	"not",
-	"if",
-	"then",
-	"else",
 }
 
 func codexJSONSchemaMissesRequired(schema gjson.Result) bool {
@@ -210,7 +366,7 @@ func codexJSONSchemaMissesRequired(schema gjson.Result) bool {
 			}
 		}
 	}
-	for _, keyword := range codexJSONSchemaMapKeywords {
+	for _, keyword := range util.SchemaMapKeywords {
 		children := schema.Get(keyword)
 		if !children.IsObject() {
 			continue
@@ -221,7 +377,7 @@ func codexJSONSchemaMissesRequired(schema gjson.Result) bool {
 			}
 		}
 	}
-	for _, keyword := range codexJSONSchemaValueKeywords {
+	for _, keyword := range util.SchemaValueKeywords {
 		if child := schema.Get(keyword); child.Exists() && codexJSONSchemaMissesRequired(child) {
 			return true
 		}

@@ -1114,7 +1114,7 @@ func (s *responsesAPISerializer) emitCompleted() []byte {
 			evt, _ = sjson.SetBytes(evt, "response.usage.input_tokens", usagePromptForTarget(s.usage, FormatOpenAIResponse))
 		}
 		if usageHasCompletion(s.usage) {
-			evt, _ = sjson.SetBytes(evt, "response.usage.output_tokens", s.usage.CompletionTokens)
+			evt, _ = sjson.SetBytes(evt, "response.usage.output_tokens", usageCompletionForTarget(s.usage, FormatOpenAIResponse))
 		}
 		if total, ok := usageTotalForTarget(s.usage, FormatOpenAIResponse); ok {
 			evt, _ = sjson.SetBytes(evt, "response.usage.total_tokens", total)

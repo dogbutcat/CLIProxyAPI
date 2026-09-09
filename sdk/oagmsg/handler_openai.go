@@ -924,7 +924,7 @@ func (h *OpenAIHandler) FormatResponse(resp *UnifiedResponse, model string) ([]b
 			usageMap["prompt_tokens"] = usagePromptForTarget(resp.Usage, FormatOpenAI)
 		}
 		if usageHasCompletion(resp.Usage) {
-			usageMap["completion_tokens"] = resp.Usage.CompletionTokens
+			usageMap["completion_tokens"] = usageCompletionForTarget(resp.Usage, FormatOpenAI)
 		}
 		if total, ok := usageTotalForTarget(resp.Usage, FormatOpenAI); ok {
 			usageMap["total_tokens"] = total

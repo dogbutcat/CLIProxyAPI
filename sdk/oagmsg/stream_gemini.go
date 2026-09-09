@@ -141,8 +141,13 @@ func (h *GeminiHandler) parseStreamChunkWithState(rawJSON []byte, state *streamP
 						continue
 					}
 
-					// Text content (with optional thought flag).
-					if text := part.Get("text"); text.Exists() {
+					// Text content (with optional thought flag). Speech-to-text
+					// Gemini models may deliver transcript text in audioTranscription.
+					text := part.Get("text")
+					if !text.Exists() {
+						text = part.Get("audioTranscription.text")
+					}
+					if text.Exists() {
 						if part.Get("thought").Bool() {
 							deltas = append(deltas, StreamDelta{
 								Type:      EventThinkingDelta,
