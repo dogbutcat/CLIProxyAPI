@@ -3,6 +3,7 @@ package oagmsg
 import (
 	"encoding/json"
 	"fmt"
+	"sort"
 
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -15,6 +16,15 @@ var _ StreamHandler = (*AnthropicHandler)(nil)
 // zero or more StreamDelta events. The JSON body should have the data: prefix
 // already stripped by the session layer.
 func (h *AnthropicHandler) ParseStreamChunk(rawJSON []byte) ([]StreamDelta, error) {
+	var state streamParseState
+	return h.parseStreamChunkWithState(rawJSON, &state)
+}
+
+func (h *AnthropicHandler) parseStreamChunkWithState(rawJSON []byte, state *streamParseState) ([]StreamDelta, error) {
+	if state == nil {
+		var local streamParseState
+		state = &local
+	}
 	root := gjson.ParseBytes(rawJSON)
 	eventType := root.Get("type").String()
 
@@ -32,9 +42,11 @@ func (h *AnthropicHandler) ParseStreamChunk(rawJSON []byte) ([]StreamDelta, erro
 		})
 		// message_start may include initial usage (input_tokens).
 		if usage := msg.Get("usage"); usage.Exists() {
+			parsedUsage := claudeUsage(usage)
+			mergeUnifiedUsage(&state.anthropic.usage, parsedUsage)
 			deltas = append(deltas, StreamDelta{
 				Type:  EventUsage,
-				Usage: claudeUsage(usage),
+				Usage: parsedUsage,
 			})
 		}
 		return deltas, nil
@@ -125,9 +137,11 @@ func (h *AnthropicHandler) ParseStreamChunk(rawJSON []byte) ([]StreamDelta, erro
 			}
 		}
 		if usage := root.Get("usage"); usage.Exists() {
+			parsedUsage := claudeUsage(usage)
+			mergeUnifiedUsage(&state.anthropic.usage, parsedUsage)
 			deltas = append(deltas, StreamDelta{
 				Type:  EventUsage,
-				Usage: claudeUsage(usage),
+				Usage: parsedUsage,
 				Extra: extra,
 			})
 		} else if extra != nil {
@@ -139,10 +153,20 @@ func (h *AnthropicHandler) ParseStreamChunk(rawJSON []byte) ([]StreamDelta, erro
 		return deltas, nil
 
 	case "message_stop":
-		return []StreamDelta{{
+		deltas := []StreamDelta{{
 			Type:         EventDone,
 			FinishReason: "stop",
-		}}, nil
+		}}
+		if state.anthropic.usage != nil && !state.anthropic.trailingUsageSent {
+			state.anthropic.trailingUsageSent = true
+			usage := *state.anthropic.usage
+			deltas = append(deltas, StreamDelta{
+				Type:  EventUsage,
+				Usage: &usage,
+				Extra: map[string]any{openAIEmptyChoicesUsageExtra: true},
+			})
+		}
+		return deltas, nil
 
 	case "ping":
 		return []StreamDelta{{Type: EventPing}}, nil
@@ -186,26 +210,29 @@ func (h *AnthropicHandler) NewStreamSerializer(model string) StreamSerializer {
 		textBlockIndex:   -1,
 		thinkBlockIndex:  -1,
 		activeToolBlocks: make(map[int]bool),
+		toolBlockIndexes: make(map[int]int),
 	}
 }
 
 // anthropicStreamSerializer maintains state for serializing StreamDelta events
 // into Anthropic /v1/messages SSE format with content_block lifecycle management.
 type anthropicStreamSerializer struct {
-	model             string
-	messageID         string
-	messageStarted    bool
-	nextBlockIndex    int
-	textBlockIndex    int
-	thinkBlockIndex   int
-	activeToolBlocks  map[int]bool
-	finishReason      string
-	stopSequence      string
-	inputTokens       int
-	outputTokens      int
-	cacheReadTokens   int
-	webSearchRequests int
-	serverSearchID    string
+	model              string
+	messageID          string
+	messageStarted     bool
+	nextBlockIndex     int
+	textBlockIndex     int
+	thinkBlockIndex    int
+	activeToolBlocks   map[int]bool
+	toolBlockIndexes   map[int]int
+	bufferedInterleave []StreamDelta
+	finishReason       string
+	stopSequence       string
+	inputTokens        int
+	outputTokens       int
+	cacheReadTokens    int
+	webSearchRequests  int
+	serverSearchID     string
 }
 
 // Serialize converts a StreamDelta into zero or more Anthropic SSE event lines.
@@ -236,6 +263,10 @@ func (s *anthropicStreamSerializer) Serialize(delta StreamDelta) [][]byte {
 		if !s.messageStarted {
 			results = append(results, s.emitMessageStart()...)
 		}
+		if s.hasActiveToolBlocks() {
+			s.bufferedInterleave = append(s.bufferedInterleave, delta)
+			break
+		}
 		// Start thinking block if needed.
 		if s.thinkBlockIndex < 0 {
 			s.thinkBlockIndex = s.nextBlockIndex
@@ -260,6 +291,10 @@ func (s *anthropicStreamSerializer) Serialize(delta StreamDelta) [][]byte {
 	case EventTextDelta:
 		if !s.messageStarted {
 			results = append(results, s.emitMessageStart()...)
+		}
+		if s.hasActiveToolBlocks() {
+			s.bufferedInterleave = append(s.bufferedInterleave, delta)
+			break
 		}
 		forceTextBlock := boolExtra(delta.Extra, "anthropic_force_text_block")
 		citations := webSearchCitationsExtra(delta.Extra, "anthropic_citations")
@@ -326,6 +361,7 @@ func (s *anthropicStreamSerializer) Serialize(delta StreamDelta) [][]byte {
 		blockIdx := s.nextBlockIndex
 		s.nextBlockIndex++
 		s.activeToolBlocks[blockIdx] = true
+		s.toolBlockIndexes[delta.ToolIndex] = blockIdx
 
 		if delta.ToolType == streamToolTypeServerWebSearchResult {
 			toolUseID := delta.ToolCallID
@@ -359,23 +395,29 @@ func (s *anthropicStreamSerializer) Serialize(delta StreamDelta) [][]byte {
 			blockStart, _ = sjson.SetBytes(blockStart, "content_block.signature", delta.Signature)
 		}
 		results = append(results, appendSSEEvent("content_block_start", blockStart))
+		if delta.ToolArgs != "" {
+			results = append(results, s.emitToolDelta(blockIdx, delta.ToolArgs)...)
+		}
 
 	case EventToolDelta:
 		if delta.ToolArgs != "" {
-			// Find the active tool block for this delta. Use the last opened one.
-			blockIdx := s.nextBlockIndex - 1
-			blockDelta := []byte(`{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":""}}`)
-			blockDelta, _ = sjson.SetBytes(blockDelta, "index", blockIdx)
-			blockDelta, _ = sjson.SetBytes(blockDelta, "delta.partial_json", delta.ToolArgs)
-			results = append(results, appendSSEEvent("content_block_delta", blockDelta))
+			if blockIdx := s.toolBlockIndexForDelta(delta); blockIdx >= 0 {
+				results = append(results, s.emitToolDelta(blockIdx, delta.ToolArgs)...)
+			}
 		}
 
 	case EventToolDone:
-		// Close the most recent active tool block.
-		blockIdx := s.nextBlockIndex - 1
+		blockIdx := s.toolBlockIndexForDelta(delta)
+		if blockIdx >= 0 && delta.ToolArgs != "" {
+			results = append(results, s.emitToolDelta(blockIdx, delta.ToolArgs)...)
+		}
 		if s.activeToolBlocks[blockIdx] {
 			results = append(results, s.closeBlock(blockIdx)...)
 			delete(s.activeToolBlocks, blockIdx)
+		}
+		delete(s.toolBlockIndexes, delta.ToolIndex)
+		if !s.hasActiveToolBlocks() {
+			results = append(results, s.flushBufferedInterleave()...)
 		}
 
 	case EventDone:
@@ -428,10 +470,13 @@ func (s *anthropicStreamSerializer) Flush() [][]byte {
 	}
 
 	// Close any remaining tool blocks.
-	for idx := range s.activeToolBlocks {
+	for _, idx := range s.sortedActiveToolBlockIndexes() {
 		results = append(results, s.closeBlock(idx)...)
 	}
 	s.activeToolBlocks = make(map[int]bool)
+	s.toolBlockIndexes = make(map[int]int)
+
+	results = append(results, s.flushBufferedInterleave()...)
 
 	// Emit message_delta with stop_reason and usage.
 	if s.finishReason == "" {
@@ -491,6 +536,56 @@ func (s *anthropicStreamSerializer) emitMessageStart() [][]byte {
 	msgStart, _ = sjson.SetBytes(msgStart, "message.id", s.messageID)
 	msgStart, _ = sjson.SetBytes(msgStart, "message.model", s.model)
 	return [][]byte{appendSSEEvent("message_start", msgStart)}
+}
+
+func (s *anthropicStreamSerializer) hasActiveToolBlocks() bool {
+	return len(s.activeToolBlocks) > 0
+}
+
+func (s *anthropicStreamSerializer) toolBlockIndexForDelta(delta StreamDelta) int {
+	if blockIdx, ok := s.toolBlockIndexes[delta.ToolIndex]; ok && s.activeToolBlocks[blockIdx] {
+		return blockIdx
+	}
+	if delta.BlockIndex >= 0 && s.activeToolBlocks[delta.BlockIndex] {
+		return delta.BlockIndex
+	}
+	blockIdx := s.nextBlockIndex - 1
+	if blockIdx >= 0 && s.activeToolBlocks[blockIdx] {
+		return blockIdx
+	}
+	return -1
+}
+
+func (s *anthropicStreamSerializer) emitToolDelta(blockIdx int, toolArgs string) [][]byte {
+	if blockIdx < 0 || toolArgs == "" {
+		return nil
+	}
+	blockDelta := []byte(`{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":""}}`)
+	blockDelta, _ = sjson.SetBytes(blockDelta, "index", blockIdx)
+	blockDelta, _ = sjson.SetBytes(blockDelta, "delta.partial_json", toolArgs)
+	return [][]byte{appendSSEEvent("content_block_delta", blockDelta)}
+}
+
+func (s *anthropicStreamSerializer) sortedActiveToolBlockIndexes() []int {
+	indexes := make([]int, 0, len(s.activeToolBlocks))
+	for idx := range s.activeToolBlocks {
+		indexes = append(indexes, idx)
+	}
+	sort.Ints(indexes)
+	return indexes
+}
+
+func (s *anthropicStreamSerializer) flushBufferedInterleave() [][]byte {
+	if len(s.bufferedInterleave) == 0 {
+		return nil
+	}
+	pending := s.bufferedInterleave
+	s.bufferedInterleave = nil
+	var results [][]byte
+	for _, delta := range pending {
+		results = append(results, s.Serialize(delta)...)
+	}
+	return results
 }
 
 // closeBlock emits a content_block_stop event for the given block index.

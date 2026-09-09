@@ -391,7 +391,7 @@ func usageHasResponsesCacheWrite(u *UnifiedUsage) bool {
 		return false
 	}
 	switch resolveFormat(u.usageOrigin) {
-	case FormatCodex, FormatOpenAIResponse:
+	case FormatAnthropic, FormatCodex, FormatOpenAIResponse:
 		return true
 	default:
 		return false

@@ -554,7 +554,7 @@ func ensureGeminiTrailingUserContentItems(contents []any) []any {
 }
 
 func normalizeGeminiRequestContents(contents []any) []any {
-	if len(contents) <= 1 {
+	if len(contents) == 0 {
 		return contents
 	}
 	normalized := make([]any, 0, len(contents))
@@ -572,6 +572,9 @@ func normalizeGeminiRequestContents(contents []any) []any {
 			continue
 		}
 		normalized = append(normalized, content)
+	}
+	for idx := range normalized {
+		normalized[idx] = reorderGeminiSerializedUserContentParts(normalized[idx])
 	}
 	return normalized
 }
@@ -623,8 +626,58 @@ func appendGeminiContentParts(previous, current any) any {
 	for key, value := range previousContent {
 		updated[key] = value
 	}
-	updated["parts"] = combined
+	updated["parts"] = reorderGeminiUserPartsForRole(stringValue(previousContent["role"]), combined)
 	return updated
+}
+
+func reorderGeminiSerializedUserContentParts(content any) any {
+	contentMap, parts, ok := geminiSerializedContentParts(content)
+	if !ok {
+		return content
+	}
+	if !strings.EqualFold(strings.TrimSpace(stringValue(contentMap["role"])), "user") || !geminiUserPartsNeedReorder(parts) {
+		return content
+	}
+	ordered := reorderGeminiUserPartsForRole(stringValue(contentMap["role"]), parts)
+	updated := make(map[string]any, len(contentMap))
+	for key, value := range contentMap {
+		updated[key] = value
+	}
+	updated["parts"] = ordered
+	return updated
+}
+
+func reorderGeminiUserPartsForRole(role string, parts []any) []any {
+	if !strings.EqualFold(strings.TrimSpace(role), "user") || !geminiUserPartsNeedReorder(parts) {
+		return parts
+	}
+	ordered := make([]any, 0, len(parts))
+	otherParts := make([]any, 0, len(parts))
+	for _, part := range parts {
+		if geminiPartIsText(part) {
+			ordered = append(ordered, part)
+			continue
+		}
+		otherParts = append(otherParts, part)
+	}
+	return append(ordered, otherParts...)
+}
+
+func geminiUserPartsNeedReorder(parts []any) bool {
+	if len(parts) < 2 {
+		return false
+	}
+	hasFunctionResponse := false
+	for _, part := range parts {
+		if geminiPartIsFunctionResponse(part) {
+			hasFunctionResponse = true
+			continue
+		}
+		if hasFunctionResponse && geminiPartIsText(part) {
+			return true
+		}
+	}
+	return false
 }
 
 func geminiSerializedContentParts(content any) (map[string]any, []any, bool) {
@@ -641,18 +694,32 @@ func geminiSerializedContentParts(content any) (map[string]any, []any, bool) {
 
 func geminiContentPartsContainFunctionResponse(parts []any) bool {
 	for _, part := range parts {
-		partMap, ok := part.(map[string]any)
-		if !ok {
-			continue
-		}
-		if _, ok := partMap["functionResponse"]; ok {
-			return true
-		}
-		if _, ok := partMap["function_response"]; ok {
+		if geminiPartIsFunctionResponse(part) {
 			return true
 		}
 	}
 	return false
+}
+
+func geminiPartIsFunctionResponse(part any) bool {
+	partMap, ok := part.(map[string]any)
+	if !ok {
+		return false
+	}
+	if _, ok := partMap["functionResponse"]; ok {
+		return true
+	}
+	_, ok = partMap["function_response"]
+	return ok
+}
+
+func geminiPartIsText(part any) bool {
+	partMap, ok := part.(map[string]any)
+	if !ok {
+		return false
+	}
+	_, ok = partMap["text"]
+	return ok
 }
 
 func geminiContentPartsAreOnlyFunctionResponses(parts []any) bool {
@@ -948,7 +1015,9 @@ func (h *GeminiHandler) FormatResponse(resp *UnifiedResponse, model string) ([]b
 			"role":  "model",
 			"parts": parts,
 		},
-		"finishReason": geminiFinishReason(resp.FinishReason),
+	}
+	if resp.FinishReason != "" {
+		candidate["finishReason"] = geminiFinishReason(resp.FinishReason)
 	}
 
 	out := map[string]any{

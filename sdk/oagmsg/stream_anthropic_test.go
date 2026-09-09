@@ -1,6 +1,7 @@
 package oagmsg
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -112,6 +113,42 @@ func TestAnthropic_ParseStreamChunk_MessageStop(t *testing.T) {
 	}
 }
 
+func TestAnthropic_ParseStreamChunk_StatefulTrailingUsage(t *testing.T) {
+	h := &AnthropicHandler{}
+	var state streamParseState
+	chunks := [][]byte{
+		[]byte(`{"type":"message_start","message":{"id":"msg_123","model":"claude-3","usage":{"input_tokens":10,"cache_read_input_tokens":4,"cache_creation_input_tokens":2}}}`),
+		[]byte(`{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":5}}`),
+	}
+	for _, chunk := range chunks {
+		if _, err := h.parseStreamChunkWithState(chunk, &state); err != nil {
+			t.Fatalf("parseStreamChunkWithState() error = %v", err)
+		}
+	}
+	deltas, err := h.parseStreamChunkWithState([]byte(`{"type":"message_stop"}`), &state)
+	if err != nil {
+		t.Fatalf("parseStreamChunkWithState(message_stop) error = %v", err)
+	}
+	if len(deltas) != 2 || deltas[0].Type != EventDone || deltas[1].Type != EventUsage {
+		t.Fatalf("message_stop deltas = %+v, want EventDone and trailing EventUsage", deltas)
+	}
+	if !boolExtra(deltas[1].Extra, openAIEmptyChoicesUsageExtra) {
+		t.Fatalf("trailing usage missing OpenAI empty choices marker: %+v", deltas[1])
+	}
+	if got := deltas[1].Usage.PromptTokens; got != 10 {
+		t.Fatalf("prompt tokens = %d, want 10", got)
+	}
+	if got := deltas[1].Usage.CacheReadInputTokens; got != 4 {
+		t.Fatalf("cache read tokens = %d, want 4", got)
+	}
+	if got := deltas[1].Usage.CacheCreationInputTokens; got != 2 {
+		t.Fatalf("cache creation tokens = %d, want 2", got)
+	}
+	if got := deltas[1].Usage.CompletionTokens; got != 5 {
+		t.Fatalf("completion tokens = %d, want 5", got)
+	}
+}
+
 func TestAnthropic_StreamSessionPreservesStopSequenceOnMessageStop(t *testing.T) {
 	session, err := NewStreamSession(FormatAnthropic, FormatAnthropic, "claude-test")
 	if err != nil {
@@ -210,4 +247,36 @@ func TestAnthropic_Serializer_ToolStream(t *testing.T) {
 	}
 	assertContains(t, combined, "content_block_stop")
 	assertContains(t, combined, "message_delta")
+}
+
+func TestAnthropic_Serializer_BuffersInterleavedTextUntilToolBlockStops(t *testing.T) {
+	h := &AnthropicHandler{}
+	ser := h.NewStreamSerializer("claude-3")
+	ser.Serialize(StreamDelta{Type: EventStart, ID: "msg_1"})
+
+	out := string(joinRuntimeOutputs(ser.Serialize(StreamDelta{
+		Type:       EventToolStart,
+		ToolIndex:  0,
+		ToolCallID: "toolu_1",
+		ToolName:   "search",
+	})))
+	out += string(joinRuntimeOutputs(ser.Serialize(StreamDelta{Type: EventTextDelta, Content: "text after tool"})))
+	if strings.Contains(out, `"type":"text_delta"`) {
+		t.Fatalf("text emitted before tool block stopped: %s", out)
+	}
+
+	out += string(joinRuntimeOutputs(ser.Serialize(StreamDelta{
+		Type:      EventToolDone,
+		ToolIndex: 0,
+		ToolArgs:  `{"q":"x"}`,
+	})))
+	stopIndex := strings.Index(out, `"type":"content_block_stop"`)
+	textStartIndex := strings.Index(out, `"content_block":{"type":"text"`)
+	textDeltaIndex := strings.Index(out, `"type":"text_delta"`)
+	if stopIndex < 0 || textStartIndex < 0 || textDeltaIndex < 0 {
+		t.Fatalf("missing tool stop or buffered text: %s", out)
+	}
+	if !(stopIndex < textStartIndex && textStartIndex < textDeltaIndex) {
+		t.Fatalf("tool block must stop before buffered text starts: %s", out)
+	}
 }

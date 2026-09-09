@@ -133,7 +133,7 @@ func (h *InteractionsHandler) parseMessages(rawJSON []byte, toolIndex toolDescri
 		return nil, nil
 	}
 
-	for _, item := range inputField.Array() {
+	for _, item := range normalizeResponsesInputToolCallOutputs(inputField.Array()) {
 		itemType := responsesInputItemType(item)
 		parsed := h.parseInputItem(itemType, item, toolIndex)
 		if parsed != nil {
@@ -220,7 +220,7 @@ func (h *InteractionsHandler) parseInputItem(itemType string, item gjson.Result,
 			Role: "assistant",
 			Content: []ContentBlock{
 				ToolUseBlock{
-					ID:    item.Get("call_id").String(),
+					ID:    responsesInputCallID(item),
 					Name:  resolveResponsesHistoryToolName(item, toolIndex),
 					Input: input,
 				},
@@ -233,7 +233,7 @@ func (h *InteractionsHandler) parseInputItem(itemType string, item gjson.Result,
 			Role: "user",
 			Content: []ContentBlock{
 				ToolResultBlock{
-					ToolUseID:    item.Get("call_id").String(),
+					ToolUseID:    responsesInputCallID(item),
 					Content:      decodeJSONResult(item.Get("output")),
 					CacheControl: cacheCtrl,
 				},
@@ -245,7 +245,7 @@ func (h *InteractionsHandler) parseInputItem(itemType string, item gjson.Result,
 			Role: "assistant",
 			Content: []ContentBlock{
 				CustomToolUseBlock{
-					ID:    item.Get("call_id").String(),
+					ID:    responsesInputCallID(item),
 					Name:  resolveResponsesHistoryToolName(item, toolIndex),
 					Input: item.Get("input").String(),
 				},
@@ -259,7 +259,7 @@ func (h *InteractionsHandler) parseInputItem(itemType string, item gjson.Result,
 			Role: "user",
 			Content: []ContentBlock{
 				CustomToolResultBlock{
-					ToolUseID:     item.Get("call_id").String(),
+					ToolUseID:     responsesInputCallID(item),
 					Output:        responsesToolOutputText(output),
 					rawOutput:     decodeJSONResult(output),
 					rawOutputJSON: output.Raw,

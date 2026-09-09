@@ -733,6 +733,7 @@ func TestUsageProjectionMatrix(t *testing.T) {
 				{path: "usage.total_tokens", want: 22048},
 				{path: "usage.prompt_tokens_details.cached_tokens", want: 22000},
 				{path: "usage.prompt_tokens_details.cached_creation_tokens", want: 31},
+				{path: "usage.prompt_tokens_details.cache_write_tokens", want: 31},
 				// Upstream Claude->OpenAI chat does not map usage.thinking_tokens;
 				// oagmsg pins it to OpenAI's completion_tokens_details.
 				{path: "usage.completion_tokens_details.reasoning_tokens", want: 2, oracleAbsent: true},

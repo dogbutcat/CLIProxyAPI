@@ -70,6 +70,58 @@ func TestUpstreamCodexStrictJSONSchemaDowngradesOptionalProperties(t *testing.T)
 	}
 }
 
+func TestUpstreamCodexToolSchemaDialectKeywordsAreStripped(t *testing.T) {
+	raw := []byte(`{
+		"model":"gpt-5.2",
+		"messages":[{"role":"user","content":"render"}],
+		"tools":[{
+			"name":"render",
+			"input_schema":{
+				"$schema":"https://json-schema.org/draft/2020-12/schema",
+				"$id":"root",
+				"type":["object","null"],
+				"properties":{
+					"html":{"type":"string","$id":"nested","description":"<b>&"},
+					"name":{"type":"string","pattern":"^\\p{L}+$"}
+				},
+				"patternProperties":{
+					"^\\p{L}+$":{"type":"string"},
+					"^[a-z]+$":{"type":"string"}
+				},
+				"examples":[{"pattern":"^\\p{L}+$"}]
+			}
+		}]
+	}`)
+
+	out := TranslateRequest(FormatAnthropic, FormatCodex, "gpt-5.2", raw, false)
+	params := gjson.GetBytes(out, "tools.0.parameters")
+	if params.Get(`$schema`).Exists() || params.Get(`$id`).Exists() || params.Get(`properties.html.$id`).Exists() {
+		t.Fatalf("schema dialect keywords survived Codex finalization: %s", out)
+	}
+	if !params.Get("properties").IsObject() {
+		t.Fatalf("parameters.properties missing for object schema: %s", out)
+	}
+	if params.Get("properties.name.pattern").Exists() {
+		t.Fatalf("unsupported schema pattern survived Codex finalization: %s", out)
+	}
+	patternProperties := params.Get("patternProperties").Map()
+	if _, ok := patternProperties[`^\p{L}+$`]; ok {
+		t.Fatalf("unsupported patternProperties key survived Codex finalization: %s", out)
+	}
+	if _, ok := patternProperties["^[a-z]+$"]; !ok {
+		t.Fatalf("supported patternProperties key was removed: %s", out)
+	}
+	if got := params.Get("examples.0.pattern").String(); got != `^\p{L}+$` {
+		t.Fatalf("non-schema example pattern was mutated: got %q output=%s", got, out)
+	}
+	if strings.Contains(string(out), `\u003c`) || !strings.Contains(string(out), `<b>&`) {
+		t.Fatalf("tool schema should be encoded without HTML escaping: %s", out)
+	}
+	if !codexRequestAlreadyFinalized(out) {
+		t.Fatalf("request is not recognized as finalized after schema cleanup: %s", out)
+	}
+}
+
 func TestUpstreamClaudeRefusalSensitiveStopReasonsMapToContentFilter(t *testing.T) {
 	for _, reason := range []string{"refusal", "sensitive"} {
 		t.Run("nonstream_"+reason, func(t *testing.T) {
@@ -95,6 +147,52 @@ func TestUpstreamClaudeRefusalSensitiveStopReasonsMapToContentFilter(t *testing.
 				t.Fatalf("stream finish_reason did not map to content_filter: %s", joined)
 			}
 		})
+	}
+}
+
+func TestUpstreamOpenAIToGeminiIgnoresNullAndEmptyFinishReasons(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  []byte
+	}{
+		{
+			name: "null",
+			raw:  []byte(`{"id":"chatcmpl_1","model":"gpt-test","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":null}]}`),
+		},
+		{
+			name: "empty_string",
+			raw:  []byte(`{"id":"chatcmpl_1","model":"gpt-test","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":""}]}`),
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			out := TranslateNonStream(context.Background(), FormatOpenAI, FormatGemini, "gemini-test", nil, nil, tt.raw, nil)
+			if finishReason := gjson.GetBytes(out, "candidates.0.finishReason"); finishReason.Exists() {
+				t.Fatalf("finishReason should be absent for non-terminal OpenAI finish_reason: %s", out)
+			}
+			if bytes.Contains(out, []byte("OTHER_")) {
+				t.Fatalf("empty finish_reason was serialized as OTHER_: %s", out)
+			}
+		})
+	}
+}
+
+func TestUpstreamOpenAIStreamToGeminiIgnoresEmptyFinishReason(t *testing.T) {
+	var state any
+	chunks := [][]byte{
+		[]byte(`data: {"id":"chatcmpl_1","model":"gpt-test","choices":[{"index":0,"delta":{"role":"assistant","content":"ok"},"finish_reason":""}]}`),
+		[]byte(`data: [DONE]`),
+	}
+	var out [][]byte
+	for _, chunk := range chunks {
+		out = append(out, TranslateStream(context.Background(), FormatOpenAI, FormatGemini, "gemini-test", nil, nil, chunk, &state)...)
+	}
+	joined := bytes.Join(out, nil)
+	if bytes.Contains(joined, []byte("finishReason")) {
+		t.Fatalf("empty stream finish_reason emitted Gemini finishReason: %s", joined)
+	}
+	if bytes.Contains(joined, []byte("OTHER_")) {
+		t.Fatalf("empty stream finish_reason was serialized as OTHER_: %s", joined)
 	}
 }
 
@@ -330,6 +428,86 @@ func TestUpstreamResponsesToGeminiStructuredFunctionOutputUsesResultEnvelope(t *
 	}
 }
 
+func TestUpstreamResponsesToolOutputsResolveAlternateCallIDs(t *testing.T) {
+	raw := []byte(`{
+		"model":"gemini-3-flash",
+		"input":[
+			{"type":"function_call","callId":"call_lookup","name":"lookup","arguments":"{}"},
+			{"type":"function_call_output","name":"lookup","output":"ok"},
+			{"type":"custom_tool_call","id":"call_shell","name":"shell","input":"pwd"},
+			{"type":"custom_tool_call_output","tool_call_id":"call_shell","output":"done"}
+		]
+	}`)
+
+	out := TranslateRequest(FormatOpenAIResponse, FormatAnthropic, "claude-test", raw, false)
+	if got := gjson.GetBytes(out, "messages.1.content.0.tool_use_id").String(); got != "call_lookup" {
+		t.Fatalf("implicit function output ID = %q, want call_lookup; output=%s", got, out)
+	}
+	if got := gjson.GetBytes(out, "messages.3.content.0.tool_use_id").String(); got != "call_shell" {
+		t.Fatalf("alternate custom output ID = %q, want call_shell; output=%s", got, out)
+	}
+}
+
+func TestUpstreamClaudeToolWithoutSchemaDefaultsOpenAIParameters(t *testing.T) {
+	raw := []byte(`{
+		"model":"claude-test",
+		"messages":[{"role":"user","content":"hi"}],
+		"tools":[
+			{"name":"no_schema","description":"missing schema"},
+			{"name":"null_schema","input_schema":null}
+		]
+	}`)
+
+	out := TranslateRequest(FormatAnthropic, FormatOpenAI, "gpt-test", raw, false)
+	for idx, name := range []string{"no_schema", "null_schema"} {
+		params := gjson.GetBytes(out, "tools."+string(rune('0'+idx))+".function.parameters")
+		if got := params.Get("type").String(); got != "object" {
+			t.Fatalf("%s parameters.type = %q, want object; output=%s", name, got, out)
+		}
+		if !params.Get("properties").IsObject() {
+			t.Fatalf("%s parameters.properties missing; output=%s", name, out)
+		}
+	}
+}
+
+func TestUpstreamGeminiUserTrailingTextMovesBeforeFunctionResponse(t *testing.T) {
+	raw := []byte(`{
+		"model":"claude-test",
+		"messages":[
+			{"role":"assistant","content":[{"type":"tool_use","id":"call_read","name":"read","input":{}}]},
+			{"role":"user","content":[
+				{"type":"tool_result","tool_use_id":"call_read","content":"ok"},
+				{"type":"text","text":"continue after tool"}
+			]}
+		],
+		"tools":[{"name":"read","input_schema":{"type":"object","properties":{}}}]
+	}`)
+
+	out := TranslateRequest(FormatAnthropic, FormatGemini, "gemini-3-flash", raw, false)
+	var parts []gjson.Result
+	for _, content := range gjson.GetBytes(out, "contents").Array() {
+		contentParts := content.Get("parts").Array()
+		for _, part := range contentParts {
+			if part.Get("functionResponse").Exists() {
+				parts = contentParts
+				break
+			}
+		}
+		if len(parts) > 0 {
+			break
+		}
+	}
+	if len(parts) < 2 {
+		t.Fatalf("missing user content with text and functionResponse: %s", out)
+	}
+	if got := parts[0].Get("text").String(); got != "continue after tool" {
+		t.Fatalf("first part text = %q, want trailing text moved first; output=%s", got, out)
+	}
+	if !parts[1].Get("functionResponse").Exists() {
+		t.Fatalf("functionResponse should follow text: %s", out)
+	}
+}
+
 func TestUpstreamResponsesToGeminiToolResultImageNestsInlineData(t *testing.T) {
 	raw := []byte(`{
 		"model":"gemini-3.7-flash-high",
@@ -363,6 +541,31 @@ func TestUpstreamResponsesToGeminiToolResultImageNestsInlineData(t *testing.T) {
 	}
 	if gjson.GetBytes(out, "contents.2.parts.1.inlineData").Exists() {
 		t.Fatalf("Gemini image remained as sibling instead of functionResponse.parts: %s", out)
+	}
+}
+
+func TestUpstreamAntigravityResponseJsonSchemaAliasNormalizesToResponseSchema(t *testing.T) {
+	raw := []byte(`{
+		"generationConfig":{
+			"responseJsonSchema":{"type":"object","properties":{"ok":{"type":"boolean"}}}
+		},
+		"generation_config":{
+			"response_json_schema":{"type":"object","properties":{"alt":{"type":"string"}}}
+		}
+	}`)
+
+	out := normalizeAntigravityToolRequestBody(raw)
+	if !gjson.GetBytes(out, "generationConfig.responseSchema.properties.ok").Exists() {
+		t.Fatalf("camel alias did not normalize to responseSchema: %s", out)
+	}
+	if gjson.GetBytes(out, "generationConfig.responseJsonSchema").Exists() {
+		t.Fatalf("camel alias survived normalization: %s", out)
+	}
+	if !gjson.GetBytes(out, "generation_config.responseSchema.properties.alt").Exists() {
+		t.Fatalf("snake alias did not normalize to responseSchema: %s", out)
+	}
+	if gjson.GetBytes(out, "generation_config.response_json_schema").Exists() {
+		t.Fatalf("snake alias survived normalization: %s", out)
 	}
 }
 

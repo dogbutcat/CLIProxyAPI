@@ -25,9 +25,7 @@ func NormalizeToolToOpenAI(tool map[string]any) map[string]any {
 	if desc != "" {
 		fn["description"] = desc
 	}
-	if params != nil {
-		fn["parameters"] = params
-	}
+	fn["parameters"] = openAIToolParametersOrDefault(params)
 	result := map[string]any{"type": "function", "function": fn}
 	preserveToolMetadata(tool, result)
 	return result
@@ -201,6 +199,23 @@ func customToolInputSchema() map[string]any {
 			"input": map[string]any{"type": "string"},
 		},
 		"required": []any{"input"},
+	}
+}
+
+func openAIToolParametersOrDefault(params any) any {
+	if params == nil {
+		return defaultOpenAIObjectToolSchema()
+	}
+	if typed, ok := params.(map[string]any); ok && typed == nil {
+		return defaultOpenAIObjectToolSchema()
+	}
+	return params
+}
+
+func defaultOpenAIObjectToolSchema() map[string]any {
+	return map[string]any{
+		"type":       "object",
+		"properties": map[string]any{},
 	}
 }
 

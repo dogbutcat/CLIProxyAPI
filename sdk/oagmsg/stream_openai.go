@@ -11,6 +11,8 @@ import (
 // Compile-time check: OpenAIHandler implements StreamHandler.
 var _ StreamHandler = (*OpenAIHandler)(nil)
 
+const openAIEmptyChoicesUsageExtra = "openai_empty_choices_usage"
+
 // ParseStreamChunk parses a JSON body from an OpenAI chat.completion.chunk event
 // into zero or more StreamDelta events. The JSON body should have the data: prefix
 // already stripped by the session layer.
@@ -125,7 +127,7 @@ func (h *OpenAIHandler) ParseStreamChunk(rawJSON []byte) ([]StreamDelta, error) 
 	}
 
 	// Finish reason.
-	if finishReason := choice.Get("finish_reason"); finishReason.Exists() && finishReason.Type != gjson.Null {
+	if finishReason := choice.Get("finish_reason"); finishReason.Type == gjson.String && finishReason.String() != "" {
 		deltas = append(deltas, StreamDelta{
 			Type:         EventDone,
 			FinishReason: finishReason.String(),
@@ -299,6 +301,12 @@ func (s *openaiStreamSerializer) usageChunk(delta StreamDelta) []byte {
 		return nil
 	}
 	tmpl := s.newChunkTemplate()
+	if boolExtra(delta.Extra, openAIEmptyChoicesUsageExtra) {
+		tmpl = []byte(`{"id":"","object":"chat.completion.chunk","created":0,"model":"","choices":[]}`)
+		tmpl, _ = sjson.SetBytes(tmpl, "id", s.id)
+		tmpl, _ = sjson.SetBytes(tmpl, "model", s.model)
+		tmpl, _ = sjson.SetBytes(tmpl, "created", s.created)
+	}
 	if usageHasPrompt(delta.Usage) {
 		tmpl, _ = sjson.SetBytes(tmpl, "usage.prompt_tokens", usagePromptForTarget(delta.Usage, FormatOpenAI))
 	}
