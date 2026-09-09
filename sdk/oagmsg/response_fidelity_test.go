@@ -733,6 +733,7 @@ func TestUsageProjectionMatrix(t *testing.T) {
 				{path: "usage.total_tokens", want: 22048},
 				{path: "usage.prompt_tokens_details.cached_tokens", want: 22000},
 				{path: "usage.prompt_tokens_details.cached_creation_tokens", want: 31},
+				{path: "usage.prompt_tokens_details.cache_write_tokens", want: 31},
 				// Upstream Claude->OpenAI chat does not map usage.thinking_tokens;
 				// oagmsg pins it to OpenAI's completion_tokens_details.
 				{path: "usage.completion_tokens_details.reasoning_tokens", want: 2, oracleAbsent: true},
@@ -827,11 +828,16 @@ func TestUsagePresenceProjectionBranches(t *testing.T) {
 	antigravityToResponses := TranslateNonStream(ctx, FormatAntigravity, FormatOpenAIResponse, "runtime-model", nil, nil, antigravityUsageRaw, nil)
 	for _, payload := range [][]byte{geminiToResponses, antigravityToResponses} {
 		assertJSONIntBytes(t, payload, "usage.input_tokens", 10)
-		assertJSONIntBytes(t, payload, "usage.output_tokens", 2)
+		assertJSONIntBytes(t, payload, "usage.output_tokens", 5)
 		assertJSONIntBytes(t, payload, "usage.total_tokens", 15)
 		assertJSONIntBytes(t, payload, "usage.input_tokens_details.cached_tokens", 4)
 		assertJSONIntBytes(t, payload, "usage.output_tokens_details.reasoning_tokens", 3)
 	}
+	geminiToOpenAI := TranslateNonStream(ctx, FormatGemini, FormatOpenAI, "runtime-model", nil, nil, geminiUsageRaw, nil)
+	assertJSONIntBytes(t, geminiToOpenAI, "usage.prompt_tokens", 10)
+	assertJSONIntBytes(t, geminiToOpenAI, "usage.completion_tokens", 5)
+	assertJSONIntBytes(t, geminiToOpenAI, "usage.total_tokens", 15)
+	assertJSONIntBytes(t, geminiToOpenAI, "usage.completion_tokens_details.reasoning_tokens", 3)
 
 	explicitZeroTotalRaw := []byte(`{"id":"chatcmpl_2","created":1,"model":"openai-upstream","choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"ok"}}],"usage":{"prompt_tokens":2,"completion_tokens":1,"total_tokens":0}}`)
 	explicitZeroTotal := TranslateNonStream(ctx, FormatOpenAI, FormatOpenAIResponse, "runtime-model", nil, nil, explicitZeroTotalRaw, nil)
@@ -848,7 +854,13 @@ func TestUsageProjectionGeminiDerivedTotalIncludesReasoning(t *testing.T) {
 	if got := gjson.GetBytes(out, "usage.total_tokens").Int(); got != 15 {
 		t.Fatalf("total_tokens = %d, want 15; payload=%s", got, string(out))
 	}
+	if got := gjson.GetBytes(out, "usage.output_tokens").Int(); got != 5 {
+		t.Fatalf("output_tokens = %d, want candidates+thoughts 5; payload=%s", got, string(out))
+	}
 	oracle := geminiResponses.ConvertGeminiResponseToOpenAIResponsesNonStream(context.Background(), "runtime-model", nil, nil, raw, nil)
+	if got := gjson.GetBytes(oracle, "usage.output_tokens").Int(); got != 5 {
+		t.Fatalf("oracle output_tokens = %d, want candidates+thoughts 5; payload=%s", got, string(oracle))
+	}
 	if got := gjson.GetBytes(oracle, "usage.output_tokens_details.reasoning_tokens").Int(); got != 3 {
 		t.Fatalf("oracle reasoning_tokens = %d, want 3; payload=%s", got, string(oracle))
 	}
@@ -856,6 +868,47 @@ func TestUsageProjectionGeminiDerivedTotalIncludesReasoning(t *testing.T) {
 	// oagmsg pins the intended fallback total so Responses clients still see it.
 	if got := gjson.GetBytes(oracle, "usage.total_tokens"); got.Exists() {
 		t.Fatalf("oracle unexpectedly emitted total_tokens=%s; payload=%s", got.Raw, string(oracle))
+	}
+}
+
+func TestUsageProjectionGeminiStreamOpenAITargetsIncludeReasoningInOutput(t *testing.T) {
+	usage := geminiUsage(gjson.Parse(`{"promptTokenCount":10,"candidatesTokenCount":2,"thoughtsTokenCount":3,"totalTokenCount":15}`))
+
+	openAI := (&OpenAIHandler{}).NewStreamSerializer("runtime-model")
+	openAIChunks := openAI.Serialize(StreamDelta{Type: EventUsage, Usage: usage})
+	if len(openAIChunks) != 1 {
+		t.Fatalf("OpenAI usage chunks = %d, want 1", len(openAIChunks))
+	}
+	_, openAIData := parseFidelitySSE(openAIChunks[0])
+	if got := openAIData.Get("usage.completion_tokens").Int(); got != 5 {
+		t.Fatalf("OpenAI stream completion_tokens = %d, want candidates+thoughts 5; chunk=%s", got, openAIChunks[0])
+	}
+	if got := openAIData.Get("usage.completion_tokens_details.reasoning_tokens").Int(); got != 3 {
+		t.Fatalf("OpenAI stream reasoning_tokens = %d, want 3; chunk=%s", got, openAIChunks[0])
+	}
+
+	responses := newResponsesAPISerializer("runtime-model")
+	responseChunks := responses.Serialize(StreamDelta{Type: EventStart, ID: "resp_usage", Model: "runtime-model"})
+	if chunks := responses.Serialize(StreamDelta{Type: EventUsage, Usage: usage}); len(chunks) != 0 {
+		t.Fatalf("Responses usage should be deferred to completion, got %d chunks", len(chunks))
+	}
+	responseChunks = append(responseChunks, responses.Flush()...)
+	var responseData gjson.Result
+	for _, chunk := range responseChunks {
+		event, data := parseFidelitySSE(chunk)
+		if event == "response.completed" {
+			responseData = data
+			break
+		}
+	}
+	if !responseData.Exists() {
+		t.Fatalf("Responses stream missing response.completed: %q", responseChunks)
+	}
+	if got := responseData.Get("response.usage.output_tokens").Int(); got != 5 {
+		t.Fatalf("Responses stream output_tokens = %d, want candidates+thoughts 5; chunks=%q", got, responseChunks)
+	}
+	if got := responseData.Get("response.usage.output_tokens_details.reasoning_tokens").Int(); got != 3 {
+		t.Fatalf("Responses stream reasoning_tokens = %d, want 3; chunks=%q", got, responseChunks)
 	}
 }
 

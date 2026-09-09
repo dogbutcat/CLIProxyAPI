@@ -317,6 +317,16 @@ func usagePromptForTarget(u *UnifiedUsage, target Format) int {
 	return u.PromptTokens
 }
 
+func usageCompletionForTarget(u *UnifiedUsage, target Format) int {
+	if u == nil {
+		return 0
+	}
+	if u.usageOrigin == FormatGemini && (target == FormatOpenAI || target == FormatOpenAIResponse) {
+		return u.CompletionTokens + u.ReasoningTokens
+	}
+	return u.CompletionTokens
+}
+
 func usageCachedForTarget(u *UnifiedUsage, target Format) (int, bool) {
 	if u == nil {
 		return 0, false
@@ -361,7 +371,7 @@ func usageTotalForTarget(u *UnifiedUsage, target Format) (int, bool) {
 		return u.TotalTokens, true
 	}
 	if usageHasPrompt(u) || usageHasCompletion(u) {
-		return usagePromptForTarget(u, target) + u.CompletionTokens, true
+		return usagePromptForTarget(u, target) + usageCompletionForTarget(u, target), true
 	}
 	return 0, false
 }
@@ -391,7 +401,7 @@ func usageHasResponsesCacheWrite(u *UnifiedUsage) bool {
 		return false
 	}
 	switch resolveFormat(u.usageOrigin) {
-	case FormatCodex, FormatOpenAIResponse:
+	case FormatAnthropic, FormatCodex, FormatOpenAIResponse:
 		return true
 	default:
 		return false

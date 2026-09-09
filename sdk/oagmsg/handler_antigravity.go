@@ -431,8 +431,35 @@ func renameToolParameters(geminiBody []byte) []byte {
 }
 
 func normalizeAntigravityToolRequestBody(geminiBody []byte) []byte {
+	geminiBody = normalizeAntigravityResponseSchemaAliases(geminiBody)
 	geminiBody = normalizeAntigravityFunctionResponseResults(geminiBody)
 	return collapseAntigravityFunctionDeclarations(geminiBody)
+}
+
+func normalizeAntigravityResponseSchemaAliases(geminiBody []byte) []byte {
+	for _, configPath := range []string{"generationConfig", "generation_config"} {
+		config := util.GetGJSONBytesNoCopy(geminiBody, configPath)
+		if !config.IsObject() {
+			continue
+		}
+		for _, alias := range []string{"responseJsonSchema", "response_json_schema"} {
+			aliasPath := configPath + "." + alias
+			schema := util.GetGJSONBytesNoCopy(geminiBody, aliasPath)
+			if !schema.Exists() {
+				continue
+			}
+			responseSchemaPath := configPath + ".responseSchema"
+			if !util.GetGJSONBytesNoCopy(geminiBody, responseSchemaPath).Exists() {
+				if updated, err := sjson.SetRawBytes(geminiBody, responseSchemaPath, []byte(schema.Raw)); err == nil {
+					geminiBody = updated
+				}
+			}
+			if updated, err := sjson.DeleteBytes(geminiBody, aliasPath); err == nil {
+				geminiBody = updated
+			}
+		}
+	}
+	return geminiBody
 }
 
 func enableAntigravityResponsesThinkingSummaryForRequest(req *UnifiedRequest, geminiBody []byte) []byte {

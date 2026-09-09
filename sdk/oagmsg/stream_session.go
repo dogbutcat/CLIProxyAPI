@@ -102,8 +102,14 @@ type StreamTranslateSession struct {
 type streamParseState struct {
 	webSearch            codexWebSearchState
 	antigravityWebSearch antigravityWebSearchStreamState
+	anthropic            anthropicStreamParseState
 	textDeltaSeen        bool
 	gemini               geminiStreamParseState
+}
+
+type anthropicStreamParseState struct {
+	usage             *UnifiedUsage
+	trailingUsageSent bool
 }
 
 type geminiStreamParseState struct {

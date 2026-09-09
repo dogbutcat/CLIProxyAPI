@@ -2,6 +2,8 @@ package oagmsg
 
 import (
 	"testing"
+
+	"github.com/tidwall/gjson"
 )
 
 // --- OpenAI Parser Tests ---
@@ -153,4 +155,37 @@ func TestOpenAI_Serializer_Flush(t *testing.T) {
 		t.Fatalf("expected 1 chunk, got %d", len(chunks))
 	}
 	assertContains(t, string(chunks[0]), "[DONE]")
+}
+
+func TestOpenAI_Serializer_UsageOnlyEmptyChoices(t *testing.T) {
+	h := &OpenAIHandler{}
+	ser := h.NewStreamSerializer("gpt-4")
+	chunks := ser.Serialize(StreamDelta{
+		Type: EventUsage,
+		Usage: &UnifiedUsage{
+			PromptTokens:     10,
+			CompletionTokens: 5,
+			TotalTokens:      15,
+			usagePresence: usagePresence{
+				Prompt:     true,
+				Completion: true,
+				Total:      true,
+			},
+		},
+		Extra: map[string]any{openAIEmptyChoicesUsageExtra: true},
+	})
+	if len(chunks) != 1 {
+		t.Fatalf("expected 1 chunk, got %d", len(chunks))
+	}
+	payload, ok := sseDataPayload(chunks[0])
+	if !ok {
+		t.Fatalf("serializer output is not an SSE data line: %s", chunks[0])
+	}
+	root := gjson.ParseBytes(payload)
+	if choices := root.Get("choices"); !choices.IsArray() || len(choices.Array()) != 0 {
+		t.Fatalf("choices = %s, want []", choices.Raw)
+	}
+	if got := root.Get("usage.total_tokens").Int(); got != 15 {
+		t.Fatalf("total_tokens = %d, want 15; payload=%s", got, chunks[0])
+	}
 }
