@@ -97,14 +97,14 @@ func TestOpenAICompatExecutorToolResultContentByInputModalities(t *testing.T) {
 					t.Fatalf("text-only model still received an image_url part:\n%s", string(gotBody))
 				}
 			} else {
-				if toolContent.Type != gjson.String {
-					t.Fatalf("tool content type = %s, want string; body=%s", toolContent.Type, string(gotBody))
+				if !toolContent.IsArray() {
+					t.Fatalf("tool content type = %s, want array; body=%s", toolContent.Type, string(gotBody))
 				}
-				if toolContent.String() != "image inspected" {
-					t.Fatalf("tool content = %q, want %q", toolContent.String(), "image inspected")
+				if got := toolContent.Get("0.text").String(); got != "image inspected" {
+					t.Fatalf("tool content text = %q, want %q", got, "image inspected")
 				}
-				if !strings.Contains(string(gotBody), "image_url") {
-					t.Fatalf("multimodal model did not receive relayed image_url part:\n%s", string(gotBody))
+				if got := toolContent.Get("1.image_url.url").String(); got != "data:image/png;base64,AA==" {
+					t.Fatalf("tool content image_url = %q, want data URL; body=%s", got, string(gotBody))
 				}
 			}
 		})

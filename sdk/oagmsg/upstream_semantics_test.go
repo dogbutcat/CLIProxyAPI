@@ -989,6 +989,75 @@ func TestUpstreamResponsesToGeminiKeepsVisibleModelTurnBoundary(t *testing.T) {
 	}
 }
 
+func TestUpstreamResponsesBuiltinToolsToGeminiAndAntigravity(t *testing.T) {
+	raw := []byte(`{
+		"model":"gemini-test",
+		"input":"use native tools",
+		"tools":[
+			{"type":"url_context","url_context":{"max_urls":3}},
+			{"type":"code_execution","codeExecution":{"sandbox":true}},
+			{"type":"google_search","google_search":{"mode":"search"}}
+		]
+	}`)
+
+	gemini := TranslateRequest(FormatOpenAIResponse, FormatGemini, "gemini-test", raw, false)
+	if got := gjson.GetBytes(gemini, "tools.#").Int(); got != 3 {
+		t.Fatalf("Gemini tools count = %d, want 3; output=%s", got, gemini)
+	}
+	if got := gjson.GetBytes(gemini, "tools.0.urlContext.max_urls").Int(); got != 3 {
+		t.Fatalf("Gemini urlContext max_urls = %d, want 3; output=%s", got, gemini)
+	}
+	if got := gjson.GetBytes(gemini, "tools.1.codeExecution.sandbox").Bool(); !got {
+		t.Fatalf("Gemini codeExecution sandbox missing; output=%s", gemini)
+	}
+	if got := gjson.GetBytes(gemini, "tools.2.googleSearch.mode").String(); got != "search" {
+		t.Fatalf("Gemini googleSearch mode = %q, want search; output=%s", got, gemini)
+	}
+	if gjson.GetBytes(gemini, "tools.0.type").Exists() {
+		t.Fatalf("Gemini builtin tool leaked Responses type field: %s", gemini)
+	}
+
+	antigravity := TranslateRequest(FormatOpenAIResponse, FormatAntigravity, "gemini-test", raw, false)
+	if got := gjson.GetBytes(antigravity, "request.tools.#").Int(); got != 3 {
+		t.Fatalf("Antigravity tools count = %d, want 3; output=%s", got, antigravity)
+	}
+	if got := gjson.GetBytes(antigravity, "request.tools.0.urlContext.max_urls").Int(); got != 3 {
+		t.Fatalf("Antigravity urlContext max_urls = %d, want 3; output=%s", got, antigravity)
+	}
+	if got := gjson.GetBytes(antigravity, "request.tools.2.googleSearch.mode").String(); got != "search" {
+		t.Fatalf("Antigravity googleSearch mode = %q, want search; output=%s", got, antigravity)
+	}
+}
+
+func TestUpstreamGeminiBuiltinToolsToResponses(t *testing.T) {
+	raw := []byte(`{
+		"model":"gemini-test",
+		"contents":[{"role":"user","parts":[{"text":"hello"}]}],
+		"tools":[{"googleSearch":{"mode":"search"},"urlContext":{"max_urls":3}},{"codeExecution":{"sandbox":true}}]
+	}`)
+
+	out := TranslateRequest(FormatGemini, FormatOpenAIResponse, "gemini-test", raw, false)
+	tools := gjson.GetBytes(out, "tools").Array()
+	if len(tools) != 3 {
+		t.Fatalf("tools count = %d, want 3; output=%s", len(tools), out)
+	}
+	if got := tools[0].Get("type").String(); got != "url_context" {
+		t.Fatalf("tools.0 type = %q, want url_context; output=%s", got, out)
+	}
+	if got := tools[0].Get("url_context.max_urls").Int(); got != 3 {
+		t.Fatalf("tools.0 url_context.max_urls = %d, want 3; output=%s", got, out)
+	}
+	if got := tools[1].Get("type").String(); got != "google_search" {
+		t.Fatalf("tools.1 type = %q, want google_search; output=%s", got, out)
+	}
+	if got := tools[2].Get("type").String(); got != "code_execution" {
+		t.Fatalf("tools.2 type = %q, want code_execution; output=%s", got, out)
+	}
+	if got := tools[2].Get("code_execution.sandbox").Bool(); !got {
+		t.Fatalf("tools.2 code_execution.sandbox missing; output=%s", out)
+	}
+}
+
 func TestUpstreamResponsesToOpenAICombinesAssistantReasoningContentAndToolCalls(t *testing.T) {
 	raw := []byte(`{
 		"model":"k3",
@@ -1019,6 +1088,51 @@ func TestUpstreamResponsesToOpenAICombinesAssistantReasoningContentAndToolCalls(
 	}
 	if got := messages[1].Get("tool_call_id").String(); got != "call_4" {
 		t.Fatalf("tool output call id = %q, want call_4; output=%s", got, out)
+	}
+}
+
+func TestUpstreamResponsesToOpenAIPreservesReasoningAcrossFollowUpToolTurns(t *testing.T) {
+	raw := []byte(`{
+		"model":"deepseek-v4.1-flash",
+		"reasoning":{"effort":"high"},
+		"input":[
+			{"type":"reasoning","id":"rs_1","summary":[{"type":"summary_text","text":"first plan"}]},
+			{"type":"message","role":"assistant","content":[{"type":"output_text","text":"starting"}]},
+			{"type":"function_call","call_id":"call_1","name":"exec_command","arguments":"{\"cmd\":\"ls\"}"},
+			{"type":"function_call_output","call_id":"call_1","output":"ok"},
+			{"type":"function_call","call_id":"call_2","name":"write_stdin","arguments":"{\"data\":\"x\"}"},
+			{"type":"function_call_output","call_id":"call_2","output":"ok"},
+			{"type":"message","role":"user","content":[{"type":"input_text","text":"new turn"}]},
+			{"type":"function_call","call_id":"call_3","name":"exec_command","arguments":"{\"cmd\":\"pwd\"}"}
+		]
+	}`)
+
+	out := TranslateRequest(FormatOpenAIResponse, FormatOpenAI, "deepseek-v4.1-flash", raw, false)
+	messages := gjson.GetBytes(out, "messages").Array()
+	if len(messages) != 6 {
+		t.Fatalf("messages count = %d, want 6; output=%s", len(messages), out)
+	}
+	if got := messages[0].Get("reasoning_content").String(); got != "first plan" {
+		t.Fatalf("messages.0 reasoning_content = %q, want first plan; output=%s", got, out)
+	}
+	if got := messages[2].Get("reasoning_content").String(); got != "first plan" {
+		t.Fatalf("messages.2 reasoning_content = %q, want first plan; output=%s", got, out)
+	}
+	if got := messages[5].Get("reasoning_content").String(); got != "[reasoning unavailable]" {
+		t.Fatalf("messages.5 reasoning_content = %q, want placeholder; output=%s", got, out)
+	}
+}
+
+func TestUpstreamResponsesToOpenAIEffortNoneDoesNotInjectReasoning(t *testing.T) {
+	raw := []byte(`{
+		"model":"gpt-test",
+		"reasoning":{"effort":"none"},
+		"input":[{"type":"function_call","call_id":"call_1","name":"exec_command","arguments":"{}"}]
+	}`)
+
+	out := TranslateRequest(FormatOpenAIResponse, FormatOpenAI, "gpt-test", raw, false)
+	if gjson.GetBytes(out, "messages.0.reasoning_content").Exists() {
+		t.Fatalf("reasoning_content should not be injected when effort is none; output=%s", out)
 	}
 }
 

@@ -4614,7 +4614,7 @@ func TestRegressionIssue5951_InterleavedToolsWithTextAndContinuation(t *testing.
 				if ev.Get("type").String() == "response.output_item.done" {
 					doneItemTypes = append(doneItemTypes, ev.Get("item.type").String())
 					if ev.Get("item.type").String() == "function_call" {
-						callArgs[ev.Get("item.id").String()] = ev.Get("item.arguments").String()
+						callArgs[ev.Get("item.call_id").String()] = ev.Get("item.arguments").String()
 					}
 				}
 			}

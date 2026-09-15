@@ -14,6 +14,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/oagmsg"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
@@ -175,7 +176,7 @@ func (e *MetaExecutor) translateMetaCompleted(ctx context.Context, req cliproxye
 		case "response.completed", "response.incomplete":
 			completedData := patchCodexCompletedOutput(eventData, outputItemsByIndex, outputItemsFallback)
 			var param any
-			out := sdktranslator.TranslateNonStream(ctx, prepared.to, prepared.responseFormat, req.Model, prepared.originalPayload, prepared.body, completedData, &param)
+			out := oagmsg.TranslateNonStream(ctx, prepared.to, prepared.responseFormat, req.Model, prepared.originalPayload, prepared.body, completedData, &param)
 			return metaCompletedTranslation{payload: out, sourceEvent: completedData}, nil
 		}
 	}
@@ -183,7 +184,7 @@ func (e *MetaExecutor) translateMetaCompleted(ctx context.Context, req cliproxye
 	if completedData, ok := metaAsCompletedEvent(data); ok {
 		completedData = patchCodexCompletedOutput(completedData, outputItemsByIndex, outputItemsFallback)
 		var param any
-		out := sdktranslator.TranslateNonStream(ctx, prepared.to, prepared.responseFormat, req.Model, prepared.originalPayload, prepared.body, completedData, &param)
+		out := oagmsg.TranslateNonStream(ctx, prepared.to, prepared.responseFormat, req.Model, prepared.originalPayload, prepared.body, completedData, &param)
 		return metaCompletedTranslation{payload: out, sourceEvent: completedData}, nil
 	}
 
@@ -207,7 +208,7 @@ func (e *MetaExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth,
 		return cliproxyexecutor.Response{}, fmt.Errorf("meta executor: token counting failed: %w", errCount)
 	}
 	usageJSON := fmt.Sprintf(`{"response":{"usage":{"input_tokens":%d,"output_tokens":0,"total_tokens":%d}}}`, count, count)
-	translated := sdktranslator.TranslateTokenCount(ctx, prepared.to, prepared.responseFormat, count, []byte(usageJSON))
+	translated := oagmsg.TranslateTokenCount(ctx, prepared.to, prepared.responseFormat, count, []byte(usageJSON))
 	return cliproxyexecutor.Response{Payload: translated}, nil
 }
 

@@ -287,7 +287,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 				if !timeoutReached && bufferedFrames < codexBootstrapMaxBufferedFrames && bufferedBytes+frameBytes <= codexBootstrapMaxBufferedBytes {
 					bufferedFrames++
 					bufferedBytes += frameBytes
-					bufferedChunks = append(bufferedChunks, chunks...)
+					bufferedChunks = append(bufferedChunks, codexBootstrapCommittingChunks(chunks)...)
 					continue
 				}
 				exhausted := "frame budget"

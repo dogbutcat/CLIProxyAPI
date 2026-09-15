@@ -207,9 +207,10 @@ func TestBuilder_WithTranslationContext(t *testing.T) {
 // --- Fix B: Tool Call Dedup Tests ---
 
 func TestSession_Middleware_ToolCallDedup_SuppressDoneAfterDeltas(t *testing.T) {
-	// When arguments were streamed via deltas, the final .done event should be suppressed.
+	// OpenAI Chat has no explicit tool done event, so a final Responses-family
+	// .done carrying already-streamed arguments should be suppressed.
 	ctx := &TranslationContext{}
-	session, err := NewStreamSession(FormatCodex, FormatCodex, "codex", WithContext(ctx))
+	session, err := NewStreamSession(FormatCodex, FormatOpenAI, "codex", WithContext(ctx))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -230,6 +231,32 @@ func TestSession_Middleware_ToolCallDedup_SuppressDoneAfterDeltas(t *testing.T) 
 	out3, _ := session.Translate([]byte(`data: {"type":"response.function_call_arguments.done","call_id":"call_abc","arguments":"{\"q\":\"test\"}"}`))
 	if len(out3) != 0 {
 		t.Fatalf("ToolDone should be suppressed after deltas, got %d outputs", len(out3))
+	}
+}
+
+func TestSession_Middleware_ToolCallDedup_PreserveDoneAfterDeltasForResponsesFamily(t *testing.T) {
+	ctx := &TranslationContext{}
+	session, err := NewStreamSession(FormatCodex, FormatCodex, "codex", WithContext(ctx))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	out1, _ := session.Translate([]byte(`data: {"type":"response.output_item.added","item":{"type":"function_call","call_id":"call_abc","name":"search"}}`))
+	if len(out1) == 0 {
+		t.Fatal("ToolStart should produce output")
+	}
+
+	out2, _ := session.Translate([]byte(`data: {"type":"response.function_call_arguments.delta","call_id":"call_abc","delta":"{\"q\":"}`))
+	if len(out2) == 0 {
+		t.Fatal("ToolDelta should produce output")
+	}
+
+	out3, _ := session.Translate([]byte(`data: {"type":"response.function_call_arguments.done","call_id":"call_abc","arguments":"{\"q\":\"test\"}"}`))
+	if len(out3) == 0 {
+		t.Fatal("ToolDone should be preserved for Responses-family targets")
+	}
+	if got := gjson.GetBytes(out3[0], "arguments").String(); got != `{"q":"test"}` {
+		t.Fatalf("ToolDone arguments = %q", got)
 	}
 }
 

@@ -1,6 +1,7 @@
 package oagmsg
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/tidwall/gjson"
@@ -20,6 +21,28 @@ func TestOpenAI_ParseStreamChunk_Start(t *testing.T) {
 	}
 	if deltas[0].ID != "chatcmpl-123" || deltas[0].Model != "gpt-4" || deltas[0].Created != 1700000000 {
 		t.Fatalf("wrong metadata: %+v", deltas[0])
+	}
+}
+
+func TestOpenAIStreamSerializerPreservesHTMLToolArgumentChars(t *testing.T) {
+	serializer := (&OpenAIHandler{}).NewStreamSerializer("gpt-test")
+	lines := serializer.Serialize(StreamDelta{
+		Type:      EventToolDelta,
+		ToolIndex: 0,
+		ToolArgs:  `{"html":"<div>&</div>"}`,
+	})
+	if len(lines) != 1 {
+		t.Fatalf("lines = %d, want 1", len(lines))
+	}
+	data := string(extractSSEData(lines[0]))
+	if containsHTMLUnicodeEscape(data) {
+		t.Fatalf("stream tool arguments contain escaped HTML characters: %s", data)
+	}
+	if got := gjson.Get(data, "choices.0.delta.tool_calls.0.function.arguments").String(); got != `{"html":"<div>&</div>"}` {
+		t.Fatalf("stream tool arguments = %q, want raw HTML chars; body=%s", got, data)
+	}
+	if !strings.Contains(data, `<div>&</div>`) {
+		t.Fatalf("stream payload missing raw HTML chars: %s", data)
 	}
 }
 

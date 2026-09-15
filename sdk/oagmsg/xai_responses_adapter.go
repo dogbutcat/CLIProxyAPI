@@ -20,6 +20,7 @@ const (
 	xaiNamespaceToolType       = "namespace"
 	xaiToolSearchType          = "tool_search"
 	xaiWebSearchToolType       = "web_search"
+	xaiClientWebSearchAlias    = "clientfn_web_search"
 	xaiXSearchToolType         = "x_search"
 	xaiCodexAppNamespaceName   = "codex_app"
 	xaiAutomationUpdateTool    = "automation_update"
@@ -131,6 +132,7 @@ type XAIResponsesToolState struct {
 	namespaceTools      map[string]XAINamespaceToolRef
 	clientDeclaredTools map[XAIClientToolKey]struct{}
 	shouldFold          bool
+	webSearchAlias      string
 	restorer            *XAIResponsesNamespaceRestorer
 }
 
@@ -188,11 +190,13 @@ func PrepareXAIResponsesTools(body []byte, options ...XAIResponsesToolOptions) (
 		namespaceTools:      collectXAINamespaceToolRefsWithFold(body, shouldFold),
 		clientDeclaredTools: CollectXAIClientDeclaredToolKeys(body),
 		shouldFold:          shouldFold,
+		webSearchAlias:      xaiClientWebSearchAliasForRequest(body),
 	}
 	state.restorer = NewXAIResponsesNamespaceRestorer(state.namespaceTools)
 	body = normalizeXAIToolsWithFold(body, shouldFold)
 	body = PromoteXAIAdditionalTools(body)
 	body = normalizeXAINamespaceToolChoiceWithFold(body, shouldFold)
+	body = state.aliasClientWebSearchInRequest(body)
 	body = NormalizeXAIForcedWebSearchToolChoice(body)
 	body = PruneXAIOrphanedToolChoice(body)
 	body = NormalizeXAIForcedImageGenerationToolChoice(body)
@@ -225,7 +229,8 @@ func (s *XAIResponsesToolState) FinalizeHistory(body []byte) []byte {
 	if s == nil {
 		return NormalizeXAIInputNamespaceToolCalls(body)
 	}
-	return normalizeXAIInputNamespaceToolCallsWithFold(body, s.shouldFold)
+	body = normalizeXAIInputNamespaceToolCallsWithFold(body, s.shouldFold)
+	return s.aliasClientWebSearchInHistory(body)
 }
 
 // RestoreResponse restores namespace-qualified tool call names in an xAI event.
@@ -236,7 +241,146 @@ func (s *XAIResponsesToolState) RestoreResponse(data []byte) []byte {
 	if s.restorer == nil {
 		s.restorer = NewXAIResponsesNamespaceRestorer(s.namespaceTools)
 	}
-	return s.restorer.Restore(data)
+	data = s.restorer.Restore(data)
+	return RestoreXAIClientWebSearchName(data, s.webSearchAlias)
+}
+
+// WebSearchAlias reports the upstream-safe alias for a client-declared
+// top-level function named web_search.
+func (s *XAIResponsesToolState) WebSearchAlias() string {
+	if s == nil {
+		return ""
+	}
+	return s.webSearchAlias
+}
+
+func xaiClientWebSearchAliasForRequest(body []byte) string {
+	if !gjson.ValidBytes(body) {
+		return ""
+	}
+	names := make(map[string]struct{})
+	hasClientWebSearch := false
+	collect := func(tools gjson.Result) {
+		for _, tool := range tools.Array() {
+			toolType := strings.TrimSpace(tool.Get("type").String())
+			if toolType != xaiFunctionToolType && toolType != xaiCustomToolType {
+				continue
+			}
+			name := strings.TrimSpace(tool.Get("name").String())
+			if name == "" {
+				continue
+			}
+			if name == xaiWebSearchToolType {
+				hasClientWebSearch = true
+				continue
+			}
+			names[name] = struct{}{}
+		}
+	}
+	collect(gjson.GetBytes(body, "tools"))
+	for _, item := range gjson.GetBytes(body, "input").Array() {
+		if item.Get("type").String() == "additional_tools" {
+			collect(item.Get("tools"))
+		}
+	}
+	if !hasClientWebSearch {
+		return ""
+	}
+	if _, exists := names[xaiClientWebSearchAlias]; !exists {
+		return xaiClientWebSearchAlias
+	}
+	for suffix := 1; ; suffix++ {
+		alias := fmt.Sprintf("%s_%d", xaiClientWebSearchAlias, suffix)
+		if _, exists := names[alias]; !exists {
+			return alias
+		}
+	}
+}
+
+func (s *XAIResponsesToolState) aliasClientWebSearchInRequest(body []byte) []byte {
+	alias := s.WebSearchAlias()
+	if alias == "" || !gjson.ValidBytes(body) {
+		return body
+	}
+	for index, tool := range gjson.GetBytes(body, "tools").Array() {
+		if ref, ok := s.namespaceTools[strings.TrimSpace(tool.Get("name").String())]; ok && ref.IsDispatcher {
+			continue
+		}
+		body = aliasXAIClientWebSearchAtPath(body, fmt.Sprintf("tools.%d", index), alias)
+	}
+	body = aliasXAIClientWebSearchAtPath(body, "tool_choice", alias)
+	for index := range gjson.GetBytes(body, "tool_choice.tools").Array() {
+		body = aliasXAIClientWebSearchAtPath(body, fmt.Sprintf("tool_choice.tools.%d", index), alias)
+	}
+	return body
+}
+
+func (s *XAIResponsesToolState) aliasClientWebSearchInHistory(body []byte) []byte {
+	alias := s.WebSearchAlias()
+	if alias == "" || !gjson.ValidBytes(body) {
+		return body
+	}
+	for index := range gjson.GetBytes(body, "input").Array() {
+		body = aliasXAIClientWebSearchAtPath(body, fmt.Sprintf("input.%d", index), alias)
+	}
+	return body
+}
+
+func aliasXAIClientWebSearchAtPath(body []byte, path, alias string) []byte {
+	value := gjson.GetBytes(body, path)
+	if !value.IsObject() {
+		return body
+	}
+	itemType := strings.TrimSpace(value.Get("type").String())
+	if itemType != xaiFunctionToolType && itemType != xaiCustomToolType && itemType != "function_call" {
+		return body
+	}
+	if namespace := strings.TrimSpace(value.Get("namespace").String()); namespace != "" {
+		return body
+	}
+	if strings.TrimSpace(value.Get("name").String()) != xaiWebSearchToolType {
+		return body
+	}
+	updated, err := sjson.SetBytes(body, path+".name", alias)
+	if err != nil {
+		return body
+	}
+	return updated
+}
+
+// RestoreXAIClientWebSearchName maps the upstream-safe alias for a client
+// function named web_search back to the public Responses identity.
+func RestoreXAIClientWebSearchName(data []byte, alias string) []byte {
+	alias = strings.TrimSpace(alias)
+	if alias == "" || len(data) == 0 || !gjson.ValidBytes(data) {
+		return data
+	}
+	data = restoreXAIClientWebSearchNameAtPath(data, "item", alias)
+	for index := range gjson.GetBytes(data, "response.output").Array() {
+		data = restoreXAIClientWebSearchNameAtPath(data, fmt.Sprintf("response.output.%d", index), alias)
+	}
+	for index := range gjson.GetBytes(data, "output").Array() {
+		data = restoreXAIClientWebSearchNameAtPath(data, fmt.Sprintf("output.%d", index), alias)
+	}
+	return data
+}
+
+func restoreXAIClientWebSearchNameAtPath(data []byte, path, alias string) []byte {
+	item := gjson.GetBytes(data, path)
+	if !item.IsObject() || item.Get("type").String() != "function_call" {
+		return data
+	}
+	if namespace := strings.TrimSpace(item.Get("namespace").String()); namespace != "" {
+		return data
+	}
+	if strings.TrimSpace(item.Get("name").String()) != alias {
+		return data
+	}
+	updated, err := sjson.SetBytes(data, path+".name", xaiWebSearchToolType)
+	if err != nil {
+		return data
+	}
+	return updated
 }
 
 // ClampToolsLimit preserves namespace dispatchers first when trimming a request
@@ -408,7 +552,46 @@ func xaiToolChoiceMatchesAvailable(choice gjson.Result, available map[xaiToolCho
 // NormalizeXAIForcedWebSearchToolChoice rewrites Codex's hosted-tool choice
 // into the allowed_tools form accepted by xAI's ModelToolChoice schema.
 func NormalizeXAIForcedWebSearchToolChoice(body []byte) []byte {
-	return normalizeXAIForcedHostedToolChoice(body, normalizeXAIForcedWebSearchChoiceTool)
+	body = normalizeXAIForcedHostedToolChoice(body, normalizeXAIForcedWebSearchChoiceTool)
+	return normalizeXAIHostedWebSearchAllowedToolsChoice(body)
+}
+
+func normalizeXAIHostedWebSearchAllowedToolsChoice(body []byte) []byte {
+	choice := gjson.GetBytes(body, "tool_choice")
+	if !choice.IsObject() || strings.TrimSpace(choice.Get("type").String()) != "allowed_tools" {
+		return body
+	}
+	allowed := choice.Get("tools")
+	if !allowed.IsArray() {
+		return body
+	}
+	kept := make([][]byte, 0, len(allowed.Array()))
+	webSearchOnly := true
+	removedWebSearch := false
+	for _, tool := range allowed.Array() {
+		if xaiIsHostedWebSearchChoiceTool(tool) {
+			removedWebSearch = true
+			continue
+		}
+		webSearchOnly = false
+		kept = append(kept, []byte(tool.Raw))
+	}
+	if !removedWebSearch {
+		return body
+	}
+	if webSearchOnly {
+		mode := strings.TrimSpace(choice.Get("mode").String())
+		if mode != "auto" {
+			mode = "required"
+		}
+		body = xaiKeepOnlyHostedWebSearchTools(body)
+		return xaiSetToolChoiceString(body, mode)
+	}
+	updated, err := sjson.SetRawBytes(body, "tool_choice.tools", joinRawJSONArray(kept))
+	if err != nil {
+		return body
+	}
+	return updated
 }
 
 // NormalizeXAIForcedImageGenerationToolChoice rewrites image_generation choices
@@ -491,6 +674,44 @@ func normalizeXAIForcedWebSearchChoiceTool(choice gjson.Result) ([]byte, bool) {
 	return nil, false
 }
 
+func xaiIsHostedWebSearchChoiceTool(tool gjson.Result) bool {
+	_, ok := normalizeXAIForcedWebSearchChoiceTool(tool)
+	return ok
+}
+
+func xaiToolsAreHostedWebSearchOnly(tools gjson.Result) bool {
+	if !tools.IsArray() || len(tools.Array()) == 0 {
+		return false
+	}
+	for _, tool := range tools.Array() {
+		if !xaiIsHostedWebSearchChoiceTool(tool) {
+			return false
+		}
+	}
+	return true
+}
+
+func xaiKeepOnlyHostedWebSearchTools(body []byte) []byte {
+	tools := gjson.GetBytes(body, "tools")
+	if !tools.IsArray() {
+		return body
+	}
+	kept := make([][]byte, 0, len(tools.Array()))
+	for _, tool := range tools.Array() {
+		if xaiIsHostedWebSearchChoiceTool(tool) {
+			kept = append(kept, []byte(tool.Raw))
+		}
+	}
+	if len(kept) == 0 || len(kept) == len(tools.Array()) {
+		return body
+	}
+	updated, err := sjson.SetRawBytes(body, "tools", joinRawJSONArray(kept))
+	if err != nil {
+		return body
+	}
+	return updated
+}
+
 func normalizeXAIForcedImageGenerationChoiceTool(choice gjson.Result) ([]byte, bool) {
 	if !choice.IsObject() {
 		return nil, false
@@ -552,6 +773,39 @@ func XAIResponsesToolChoiceRequiresImageGenerationOnly(body []byte) bool {
 	return true
 }
 
+// XAIResponsesToolChoiceRequiresHostedWebSearchOnly reports whether a request
+// already forces xAI's native hosted web search tool.
+func XAIResponsesToolChoiceRequiresHostedWebSearchOnly(body []byte) bool {
+	choice := gjson.GetBytes(body, "tool_choice")
+	if choice.Type == gjson.String {
+		switch choice.String() {
+		case "required", "auto":
+		default:
+			return false
+		}
+		return xaiToolsAreHostedWebSearchOnly(gjson.GetBytes(body, "tools"))
+	}
+	if !choice.IsObject() {
+		return false
+	}
+	if _, ok := normalizeXAIForcedWebSearchChoiceTool(choice); ok {
+		return true
+	}
+	if strings.TrimSpace(choice.Get("type").String()) != "allowed_tools" {
+		return false
+	}
+	allowed := choice.Get("tools")
+	if !allowed.IsArray() || len(allowed.Array()) == 0 {
+		return false
+	}
+	for _, tool := range allowed.Array() {
+		if !xaiIsHostedWebSearchChoiceTool(tool) {
+			return false
+		}
+	}
+	return true
+}
+
 func xaiSetToolChoiceString(body []byte, value string) []byte {
 	updated, err := sjson.SetBytes(body, "tool_choice", value)
 	if err != nil {
@@ -594,7 +848,9 @@ func xaiTotalFlattenedToolsCount(body []byte, willInjectXSearch bool) int {
 			count += xaiCountFlattenedTools(item.Get("tools"))
 		}
 	}
-	if willInjectXSearch && !XAIResponsesRequestHasNativeXSearch(body) && !XAIResponsesToolChoiceRequiresImageGenerationOnly(body) {
+	if willInjectXSearch && !XAIResponsesRequestHasNativeXSearch(body) &&
+		!XAIResponsesToolChoiceRequiresImageGenerationOnly(body) &&
+		!XAIResponsesToolChoiceRequiresHostedWebSearchOnly(body) {
 		count++
 	}
 	return count
@@ -1053,6 +1309,26 @@ func NormalizeXAITool(tool gjson.Result, namespaceName string, keepImageGenerati
 			return nil, false, false
 		}
 		raw, changed = updated, true
+	}
+	if toolType == xaiWebSearchToolType {
+		if allowedDomains := gjson.GetBytes(raw, "allowed_domains"); allowedDomains.Exists() && allowedDomains.IsArray() {
+			updated, err := sjson.SetRawBytes(raw, "filters.allowed_domains", []byte(allowedDomains.Raw))
+			if err != nil {
+				return nil, false, false
+			}
+			updated, err = sjson.DeleteBytes(updated, "allowed_domains")
+			if err != nil {
+				return nil, false, false
+			}
+			raw, changed = updated, true
+		}
+		if gjson.GetBytes(raw, "blocked_domains").Exists() {
+			updated, err := sjson.DeleteBytes(raw, "blocked_domains")
+			if err != nil {
+				return nil, false, false
+			}
+			raw, changed = updated, true
+		}
 	}
 	if toolType == xaiFunctionToolType && !schemaTool.Get("parameters").Exists() {
 		updated, err := sjson.SetRawBytes(raw, "parameters", []byte(`{"type":"object","properties":{}}`))

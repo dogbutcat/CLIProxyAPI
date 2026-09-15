@@ -538,11 +538,14 @@ func (h *OpenAIAPIHandler) handleStreamingResponse(c *gin.Context, rawJSON []byt
 			setSSEHeaders()
 			handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
 
-			writeOpenAIChatStreamChunk(c.Writer, chunk)
-			flusher.Flush()
+			filter := &openAIChatStreamTerminalFilter{}
+			if filter.Allow(chunk) {
+				writeOpenAIChatStreamChunk(c.Writer, chunk)
+				flusher.Flush()
+			}
 
 			// Continue streaming the rest
-			h.handleStreamResult(c, flusher, func(err error) { cliCancel(err) }, dataChan, errChan)
+			h.handleStreamResult(c, flusher, func(err error) { cliCancel(err) }, dataChan, errChan, filter)
 			return
 		}
 	}
@@ -655,7 +658,8 @@ func (h *OpenAIAPIHandler) handleCompletionsStreamingResponse(c *gin.Context, ra
 
 			// Write the first chunk
 			converted := convertChatCompletionsStreamChunkToCompletions(chunk)
-			if converted != nil {
+			filter := &openAIChatStreamTerminalFilter{}
+			if converted != nil && filter.Allow(converted) {
 				_, _ = fmt.Fprintf(c.Writer, "data: %s\n\n", string(converted))
 				flusher.Flush()
 			}
@@ -691,14 +695,17 @@ func (h *OpenAIAPIHandler) handleCompletionsStreamingResponse(c *gin.Context, ra
 			h.handleStreamResult(c, flusher, func(err error) {
 				stop()
 				cliCancel(err)
-			}, convertedChan, errChan)
+			}, convertedChan, errChan, filter)
 			return
 		}
 	}
 }
-func (h *OpenAIAPIHandler) handleStreamResult(c *gin.Context, flusher http.Flusher, cancel func(error), data <-chan []byte, errs <-chan *interfaces.ErrorMessage) {
+func (h *OpenAIAPIHandler) handleStreamResult(c *gin.Context, flusher http.Flusher, cancel func(error), data <-chan []byte, errs <-chan *interfaces.ErrorMessage, filter *openAIChatStreamTerminalFilter) {
 	h.ForwardStream(c, flusher, cancel, data, errs, handlers.StreamForwardOptions{
 		WriteChunk: func(chunk []byte) {
+			if filter != nil && !filter.Allow(chunk) {
+				return
+			}
 			writeOpenAIChatStreamChunk(c.Writer, chunk)
 		},
 		WriteTerminalError: func(errMsg *interfaces.ErrorMessage) {
@@ -720,6 +727,48 @@ func (h *OpenAIAPIHandler) handleStreamResult(c *gin.Context, flusher http.Flush
 			_, _ = fmt.Fprint(c.Writer, "data: [DONE]\n\n")
 		},
 	})
+}
+
+type openAIChatStreamTerminalFilter struct {
+	seenTerminal      bool
+	terminalHadUsage  bool
+	trailingUsageSent bool
+}
+
+func (f *openAIChatStreamTerminalFilter) Allow(chunk []byte) bool {
+	if f == nil {
+		return true
+	}
+	payload := openAIChatStreamPayload(chunk)
+	if bytes.Equal(payload, []byte("[DONE]")) {
+		return true
+	}
+	if len(payload) == 0 || !gjson.ValidBytes(payload) {
+		return !f.seenTerminal
+	}
+	root := gjson.ParseBytes(payload)
+	usageExists := root.Get("usage").Exists()
+	hasChoice := root.Get("choices.0").Exists()
+	hasTerminalChoice := false
+	for _, choice := range root.Get("choices").Array() {
+		if finish := choice.Get("finish_reason"); finish.Type == gjson.String && finish.String() != "" {
+			hasTerminalChoice = true
+			break
+		}
+	}
+	if f.seenTerminal {
+		usageOnly := usageExists && !hasChoice
+		if usageOnly && !f.terminalHadUsage && !f.trailingUsageSent {
+			f.trailingUsageSent = true
+			return true
+		}
+		return false
+	}
+	if hasTerminalChoice {
+		f.seenTerminal = true
+		f.terminalHadUsage = usageExists
+	}
+	return true
 }
 
 func writeOpenAIChatStreamChunk(w io.Writer, chunk []byte) {

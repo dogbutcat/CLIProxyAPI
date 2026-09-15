@@ -33,6 +33,7 @@ type xaiPreparedRequest struct {
 	toolState             *oagmsg.XAIResponsesToolState
 	sessionID             string
 	replayScope           xaiReasoningReplayScope
+	webSearchAlias        string
 	filterInternalXSearch bool
 }
 
@@ -75,7 +76,9 @@ func (e *XAIExecutor) prepareResponsesRequestTo(ctx context.Context, req cliprox
 		WillInjectXSearch: willInjectXSearch,
 		MaxTools:          xaiMaxTools,
 	})
-	if willInjectXSearch && !oagmsg.XAIResponsesToolChoiceRequiresImageGenerationOnly(body) {
+	if willInjectXSearch &&
+		!oagmsg.XAIResponsesToolChoiceRequiresImageGenerationOnly(body) &&
+		!oagmsg.XAIResponsesToolChoiceRequiresHostedWebSearchOnly(body) {
 		body = ensureXAINativeXSearchTool(body)
 	}
 	body = toolState.ClampToolsLimit(body, xaiMaxTools)
@@ -109,8 +112,13 @@ func (e *XAIExecutor) prepareResponsesRequestTo(ctx context.Context, req cliprox
 		toolState:             toolState,
 		sessionID:             sessionID,
 		replayScope:           replayScope,
+		webSearchAlias:        toolState.WebSearchAlias(),
 		filterInternalXSearch: oagmsg.XAIResponsesRequestHasNativeXSearch(body),
 	}, nil
+}
+
+func restoreXAIClientWebSearchName(data []byte, alias string) []byte {
+	return oagmsg.RestoreXAIClientWebSearchName(data, alias)
 }
 
 func (e *XAIExecutor) recordXAIRequest(ctx context.Context, auth *cliproxyauth.Auth, url string, headers http.Header, body []byte) {

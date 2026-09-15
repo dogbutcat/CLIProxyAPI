@@ -2,6 +2,7 @@ package oagmsg
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/signature"
@@ -61,8 +62,11 @@ func (h *InteractionsHandler) ParseRequest(rawJSON []byte) (*UnifiedRequest, err
 		req.TopP = &t
 	}
 	if v := root.Get("max_output_tokens"); v.Exists() {
-		t := int(v.Int())
-		req.MaxTokens = &t
+		req.maxTokens = requestMaxTokensMetadata{present: true, isNull: v.Type == gjson.Null, raw: []byte(v.Raw)}
+		if v.Type != gjson.Null {
+			t := int(v.Int())
+			req.MaxTokens = &t
+		}
 	}
 	if tools := responsesRequestTools(toolIndex); len(tools) > 0 {
 		req.Tools = append(req.Tools, tools...)
@@ -134,15 +138,173 @@ func (h *InteractionsHandler) parseMessages(rawJSON []byte, toolIndex toolDescri
 		return nil, nil
 	}
 
-	for _, item := range normalizeResponsesInputToolCallOutputs(inputField.Array()) {
+	items := normalizeResponsesInputToolCallOutputs(inputField.Array())
+	reasoningCarry := newResponsesReasoningCarryState(root, items)
+	for _, item := range items {
 		itemType := responsesInputItemType(item)
 		parsed := h.parseInputItem(itemType, item, toolIndex)
 		if parsed != nil {
+			reasoningCarry.apply(itemType, item, parsed)
 			msgs = append(msgs, *parsed)
+		} else {
+			reasoningCarry.observe(itemType, item)
 		}
 	}
 
 	return msgs, nil
+}
+
+type responsesReasoningCarryState struct {
+	hasReasoningInSession     bool
+	latestReasoningContent    string
+	assistantSegmentReasoning bool
+}
+
+func newResponsesReasoningCarryState(root gjson.Result, items []gjson.Result) *responsesReasoningCarryState {
+	return &responsesReasoningCarryState{
+		hasReasoningInSession: responsesRequestHasReasoningSession(root, items),
+	}
+}
+
+func responsesRequestHasReasoningSession(root gjson.Result, items []gjson.Result) bool {
+	if value := root.Get("reasoning.effort"); value.Exists() {
+		return responsesReasoningValueEnabled(value)
+	}
+	if value := root.Get("reasoning_effort"); value.Exists() {
+		return responsesReasoningValueEnabled(value)
+	}
+	if value := root.Get("reasoning"); value.Exists() {
+		if value.IsObject() && len(value.Map()) == 0 {
+			return false
+		}
+		return responsesReasoningValueEnabled(value)
+	}
+	for _, item := range items {
+		if responsesInputItemType(item) == "reasoning" || item.Get("reasoning_content").Exists() {
+			return true
+		}
+	}
+	return false
+}
+
+func responsesReasoningValueEnabled(value gjson.Result) bool {
+	raw := strings.ToLower(strings.TrimSpace(value.String()))
+	return raw != "" && raw != "none" && raw != "0" && raw != "false" && raw != "{}"
+}
+
+func (s *responsesReasoningCarryState) apply(itemType string, item gjson.Result, msg *OagMessage) {
+	if s == nil || msg == nil {
+		return
+	}
+	switch itemType {
+	case "reasoning":
+		if reasoning := responsesItemReasoningContent(item); usableResponsesReasoning(reasoning) {
+			s.latestReasoningContent = reasoning
+		}
+		s.assistantSegmentReasoning = true
+	case "function_call", "custom_tool_call":
+		if reasoning := responsesItemReasoningContent(item); usableResponsesReasoning(reasoning) {
+			prependResponsesReasoningBlock(msg, reasoning)
+			s.latestReasoningContent = reasoning
+			s.assistantSegmentReasoning = true
+			return
+		}
+		if !s.assistantSegmentReasoning {
+			if fallback := s.fallbackToolReasoning(); fallback != "" {
+				prependResponsesReasoningBlock(msg, fallback)
+				s.assistantSegmentReasoning = true
+			}
+		}
+	case "message":
+		role := strings.TrimSpace(item.Get("role").String())
+		if role == "assistant" {
+			if reasoning := responsesItemReasoningContent(item); usableResponsesReasoning(reasoning) {
+				s.latestReasoningContent = reasoning
+				s.assistantSegmentReasoning = true
+			}
+			return
+		}
+		s.latestReasoningContent = ""
+		s.assistantSegmentReasoning = false
+	case "function_call_output", "custom_tool_call_output":
+		s.assistantSegmentReasoning = false
+	default:
+		if msg.Role != "assistant" {
+			s.assistantSegmentReasoning = false
+		}
+	}
+}
+
+func (s *responsesReasoningCarryState) observe(itemType string, item gjson.Result) {
+	if s == nil {
+		return
+	}
+	switch itemType {
+	case "reasoning":
+		if reasoning := responsesItemReasoningContent(item); usableResponsesReasoning(reasoning) {
+			s.latestReasoningContent = reasoning
+			s.assistantSegmentReasoning = true
+		}
+	case "message":
+		if strings.TrimSpace(item.Get("role").String()) != "assistant" {
+			s.latestReasoningContent = ""
+			s.assistantSegmentReasoning = false
+		}
+	case "function_call_output", "custom_tool_call_output":
+		s.assistantSegmentReasoning = false
+	}
+}
+
+func (s *responsesReasoningCarryState) fallbackToolReasoning() string {
+	if s.latestReasoningContent != "" {
+		return s.latestReasoningContent
+	}
+	if s.hasReasoningInSession {
+		return "[reasoning unavailable]"
+	}
+	return ""
+}
+
+func responsesItemReasoningContent(item gjson.Result) string {
+	if reasoning := item.Get("reasoning_content"); reasoning.Type == gjson.String {
+		return reasoning.String()
+	}
+	if content := item.Get("content"); content.IsArray() {
+		for _, part := range content.Array() {
+			if part.Get("type").String() == "summary_text" {
+				return part.Get("text").String()
+			}
+		}
+	}
+	if summary := item.Get("summary"); summary.IsArray() {
+		for _, part := range summary.Array() {
+			if part.Get("type").String() == "summary_text" {
+				return part.Get("text").String()
+			}
+		}
+	}
+	return item.Get("summary.0.text").String()
+}
+
+func usableResponsesReasoning(reasoning string) bool {
+	trimmed := strings.TrimSpace(reasoning)
+	return trimmed != "" && trimmed != "[reasoning unavailable]"
+}
+
+func prependResponsesReasoningBlock(msg *OagMessage, reasoning string) {
+	if !usableResponsesReasoning(reasoning) && reasoning != "[reasoning unavailable]" {
+		return
+	}
+	if len(msg.Content) > 0 {
+		if first, ok := msg.Content[0].(ThinkingBlock); ok && first.Thinking == reasoning {
+			return
+		}
+	}
+	block := ThinkingBlock{
+		Thinking:         reasoning,
+		signaturePresent: true,
+	}
+	msg.Content = append([]ContentBlock{block}, msg.Content...)
 }
 
 func responsesInputItemType(item gjson.Result) string {
@@ -163,6 +325,14 @@ func (h *InteractionsHandler) parseInputItem(itemType string, item gjson.Result,
 			oagRole = "system"
 		}
 		var blocks []ContentBlock
+		if role == "assistant" {
+			if reasoning := responsesItemReasoningContent(item); usableResponsesReasoning(reasoning) {
+				blocks = append(blocks, ThinkingBlock{
+					Thinking:         reasoning,
+					signaturePresent: true,
+				})
+			}
+		}
 		itemCacheControl := parseCacheControl(item)
 		contentResult := item.Get("content")
 		if contentResult.Type == gjson.String {
@@ -229,6 +399,12 @@ func (h *InteractionsHandler) parseInputItem(itemType string, item gjson.Result,
 		}
 
 	case "function_call_output":
+		if item.Get("_oagmsg_standalone_tool_output").Bool() || responsesOutputCallID(item) == "" {
+			return &OagMessage{
+				Role:    "user",
+				Content: responsesStandaloneToolOutputBlocks(item.Get("output")),
+			}
+		}
 		cacheCtrl := parseCacheControl(item)
 		return &OagMessage{
 			Role: "user",
@@ -255,6 +431,12 @@ func (h *InteractionsHandler) parseInputItem(itemType string, item gjson.Result,
 
 	case "custom_tool_call_output":
 		output := item.Get("output")
+		if item.Get("_oagmsg_standalone_tool_output").Bool() || responsesOutputCallID(item) == "" {
+			return &OagMessage{
+				Role:    "user",
+				Content: responsesStandaloneToolOutputBlocks(output),
+			}
+		}
 		cacheCtrl := parseCacheControl(item)
 		return &OagMessage{
 			Role: "user",
@@ -293,6 +475,24 @@ func (h *InteractionsHandler) parseInputItem(itemType string, item gjson.Result,
 	default:
 		return nil
 	}
+}
+
+func responsesStandaloneToolOutputBlocks(output gjson.Result) []ContentBlock {
+	var blocks []ContentBlock
+	switch {
+	case output.IsArray():
+		if text := responsesToolOutputText(output); text != "" {
+			blocks = append(blocks, TextBlock{Text: text})
+		}
+	case output.Exists():
+		if text := responsesToolOutputText(output); text != "" {
+			blocks = append(blocks, TextBlock{Text: text})
+		}
+	}
+	if len(blocks) == 0 {
+		blocks = append(blocks, TextBlock{Text: ""})
+	}
+	return blocks
 }
 
 func rawToolMaps(tools gjson.Result) []map[string]any {
@@ -453,7 +653,36 @@ func (h *InteractionsHandler) SerializeMessages(msgs []OagMessage) ([]byte, erro
 		items = append(items, h.serializeOneItem(msg, false)...)
 	}
 
-	return json.Marshal(items)
+	out, err := json.Marshal(items)
+	if err != nil {
+		return nil, err
+	}
+	out = preserveResponseInputToolStringFields(out, items)
+	return out, nil
+}
+
+func preserveResponseInputToolStringFields(out []byte, items []any) []byte {
+	for idx, itemAny := range items {
+		item, ok := itemAny.(map[string]any)
+		if !ok {
+			continue
+		}
+		switch stringValue(item["type"]) {
+		case "function_call":
+			if value := stringValue(item["arguments"]); value != "" {
+				if updated, err := SetStringWithoutHTMLEscape(out, fmt.Sprintf("%d.arguments", idx), value); err == nil {
+					out = updated
+				}
+			}
+		case "custom_tool_call":
+			if value := stringValue(item["input"]); value != "" {
+				if updated, err := SetStringWithoutHTMLEscape(out, fmt.Sprintf("%d.input", idx), value); err == nil {
+					out = updated
+				}
+			}
+		}
+	}
+	return out
 }
 
 // serializeOneItem serializes a single OagMessage to Responses API items.
@@ -487,7 +716,7 @@ func (h *InteractionsHandler) serializeOneItemForRequest(req *UnifiedRequest, ms
 			})
 
 		case ToolUseBlock:
-			argsJSON, _ := json.Marshal(block.Input)
+			argsJSON, _ := marshalJSONWithoutHTMLEscape(block.Input)
 			items = append(items, map[string]any{
 				"type":      "function_call",
 				"call_id":   block.ID,
@@ -713,6 +942,8 @@ func (h *InteractionsHandler) serializeRequest(req *UnifiedRequest, systemAsInst
 	}
 	if req.MaxTokens != nil {
 		out["max_output_tokens"] = *req.MaxTokens
+	} else if req.maxTokens.present && req.maxTokens.isNull {
+		out["max_output_tokens"] = nil
 	}
 	if len(req.Tools) > 0 {
 		normalized := make([]map[string]any, 0, len(req.Tools))

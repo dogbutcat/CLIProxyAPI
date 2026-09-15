@@ -64,6 +64,9 @@ func NormalizeToolToInteractions(tool map[string]any) map[string]any {
 	if descriptorToolType(tool) == "custom" {
 		return normalizeCustomToolToInteractions(tool)
 	}
+	if builtin, ok := normalizeGeminiBuiltinToolToInteractions(tool); ok {
+		return builtin
+	}
 	if isResponsesBuiltinOrPassthroughTool(tool) {
 		return tool
 	}
@@ -89,6 +92,9 @@ func NormalizeToolToInteractions(tool map[string]any) map[string]any {
 // NormalizeToolToGemini converts any known tool definition shape to Gemini
 // functionDeclarations format.
 func NormalizeToolToGemini(tool map[string]any) map[string]any {
+	if builtin, ok := normalizeResponsesBuiltinToolToGemini(tool); ok {
+		return builtin
+	}
 	if descriptorToolType(tool) == "custom" {
 		tool = normalizeCustomToolToAnthropic(tool)
 	}
@@ -109,6 +115,94 @@ func NormalizeToolToGemini(tool map[string]any) map[string]any {
 		declaration["parameters"] = normalizeGeminiParametersValue(params)
 	}
 	return map[string]any{"functionDeclarations": []any{declaration}}
+}
+
+func normalizeResponsesBuiltinToolToGemini(tool map[string]any) (map[string]any, bool) {
+	toolType := strings.TrimSpace(stringValue(tool["type"]))
+	switch toolType {
+	case "url_context":
+		return map[string]any{"urlContext": builtinToolOptions(tool, "url_context", "urlContext")}, true
+	case "code_execution":
+		return map[string]any{"codeExecution": builtinToolOptions(tool, "code_execution", "codeExecution")}, true
+	case "google_search", "web_search":
+		return map[string]any{"googleSearch": builtinToolOptions(tool, "google_search", "googleSearch", "web_search")}, true
+	case "":
+		normalized := cloneToolMap(tool)
+		changed := normalizeGeminiBuiltinAlias(normalized, "url_context", "urlContext")
+		changed = normalizeGeminiBuiltinAlias(normalized, "code_execution", "codeExecution") || changed
+		changed = normalizeGeminiBuiltinAlias(normalized, "google_search", "googleSearch") || changed
+		if value, ok := normalized["web_search"]; ok {
+			if _, exists := normalized["googleSearch"]; !exists {
+				normalized["googleSearch"] = value
+			}
+			delete(normalized, "web_search")
+			changed = true
+		}
+		if changed {
+			return normalized, true
+		}
+	}
+	return nil, false
+}
+
+func normalizeGeminiBuiltinToolToInteractions(tool map[string]any) (map[string]any, bool) {
+	for _, spec := range geminiBuiltinToolSpecs() {
+		if value, ok := firstMapValue(tool, spec.geminiKeys...); ok {
+			result := map[string]any{"type": spec.responsesType}
+			if len(value) > 0 {
+				result[spec.responsesKey] = value
+			}
+			return result, true
+		}
+	}
+	return nil, false
+}
+
+type geminiBuiltinToolSpec struct {
+	responsesType string
+	responsesKey  string
+	geminiKeys    []string
+}
+
+func geminiBuiltinToolSpecs() []geminiBuiltinToolSpec {
+	return []geminiBuiltinToolSpec{
+		{responsesType: "url_context", responsesKey: "url_context", geminiKeys: []string{"urlContext", "url_context"}},
+		{responsesType: "code_execution", responsesKey: "code_execution", geminiKeys: []string{"codeExecution", "code_execution"}},
+		{responsesType: "google_search", responsesKey: "google_search", geminiKeys: []string{"googleSearch", "google_search"}},
+	}
+}
+
+func builtinToolOptions(tool map[string]any, keys ...string) map[string]any {
+	if value, ok := firstMapValue(tool, keys...); ok {
+		return value
+	}
+	return map[string]any{}
+}
+
+func firstMapValue(tool map[string]any, keys ...string) (map[string]any, bool) {
+	for _, key := range keys {
+		value, ok := tool[key]
+		if !ok {
+			continue
+		}
+		if typed, okTyped := value.(map[string]any); okTyped {
+			return typed, true
+		}
+		return map[string]any{}, true
+	}
+	return nil, false
+}
+
+func normalizeGeminiBuiltinAlias(tool map[string]any, fromKey, toKey string) bool {
+	value, ok := tool[fromKey]
+	if !ok {
+		return false
+	}
+	if _, exists := tool[toKey]; !exists {
+		tool[toKey] = value
+	}
+	delete(tool, fromKey)
+	return true
 }
 
 func normalizeGeminiParametersValue(schema any) any {
@@ -443,15 +537,55 @@ func normalizeResponsesWebSearchToAnthropic(tool map[string]any) (map[string]any
 	return result, true
 }
 
-func normalizeResponsesToolChoiceToOpenAI(choice any) any {
-	_, _, ok := toolChoiceNameAndNamespace(choice)
+func normalizeResponsesToolChoiceToOpenAI(choice any, tools []map[string]any) any {
+	name, namespace, ok := toolChoiceNameAndNamespace(choice)
 	if !ok {
 		return NormalizeToolChoiceToOpenAI(choice)
 	}
-	if choiceMap, ok := choice.(map[string]any); ok {
-		return cloneToolMap(choiceMap)
+	if namespace != "" {
+		name = qualifyToolDescriptorName(namespace, name)
+	} else {
+		name = canonicalOpenAIToolChoiceName(name, tools)
 	}
-	return choice
+	if name == "" {
+		return NormalizeToolChoiceToOpenAI(choice)
+	}
+	return map[string]any{"type": "function", "function": map[string]any{"name": name}}
+}
+
+func canonicalOpenAIToolChoiceName(name string, tools []map[string]any) string {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return ""
+	}
+	for _, tool := range tools {
+		if openAIToolName(tool) == name {
+			return name
+		}
+	}
+	var suffixMatch string
+	suffix := "__" + name
+	for _, tool := range tools {
+		toolName := openAIToolName(tool)
+		if strings.HasSuffix(toolName, suffix) {
+			if suffixMatch != "" {
+				return name
+			}
+			suffixMatch = toolName
+		}
+	}
+	if suffixMatch != "" {
+		return suffixMatch
+	}
+	return name
+}
+
+func openAIToolName(tool map[string]any) string {
+	function, ok := tool["function"].(map[string]any)
+	if !ok {
+		return ""
+	}
+	return strings.TrimSpace(stringValue(function["name"]))
 }
 
 func normalizeAnthropicToolChoiceForRequest(choice any, sourceFormat Format, includedToolNames map[string]struct{}) any {

@@ -23,10 +23,10 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	internalsignature "github.com/router-for-me/CLIProxyAPI/v7/internal/signature"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
-	translatorcommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/common"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/oagmsg"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
@@ -299,7 +299,7 @@ func (e *DevinExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 
 	targetFormat := cliproxyexecutor.ResponseFormatOrSource(opts)
 	var param any
-	out := sdktranslator.TranslateNonStream(ctx, sdktranslator.FormatInteractions, targetFormat, req.Model, opts.OriginalRequest, req.Payload, interactionsJSON, &param)
+	out := oagmsg.TranslateNonStream(ctx, sdktranslator.FormatInteractions, targetFormat, req.Model, opts.OriginalRequest, req.Payload, interactionsJSON, &param)
 	if targetFormat == sdktranslator.FormatOpenAIResponse {
 		out = helps.EnsureResponsesUsageDetails(out)
 	}
@@ -386,7 +386,7 @@ func (e *DevinExecutor) prepareDevinHTTPRequest(ctx context.Context, auth *clipr
 	payload := req.Payload
 	isInteractionsSource := opts.SourceFormat == "" || opts.SourceFormat == sdktranslator.FormatInteractions
 	if !isInteractionsSource {
-		payload = sdktranslator.TranslateRequest(opts.SourceFormat, sdktranslator.FormatInteractions, req.Model, payload, opts.Stream)
+		payload = oagmsg.TranslateRequest(opts.SourceFormat, sdktranslator.FormatInteractions, req.Model, payload, opts.Stream)
 	}
 	systemPrompt, prompts, tools, temp, maxTokens, sessionID, cascadeID, thinkingLevel, budgetTokens := parseInteractionsPayload(payload, opts.OriginalRequest)
 	sessionID, cascadeID = resolveDevinSessionAndCascadeIDs(ctx, sessionID, cascadeID, opts)
@@ -689,7 +689,7 @@ func (e *DevinExecutor) streamDevinFrames(
 
 		if argsChunk != "" {
 			deltaEvent, _ := sjson.SetBytes([]byte(`{"event_type":"step.delta","index":0,"delta":{"type":"arguments_delta","arguments":""}}`), "index", slot.stepIndex)
-			deltaEvent, _ = translatorcommon.SetStringWithoutHTMLEscape(deltaEvent, "delta.arguments", argsChunk)
+			deltaEvent, _ = oagmsg.SetStringWithoutHTMLEscape(deltaEvent, "delta.arguments", argsChunk)
 			if !emitInteractionsEvent(deltaEvent) {
 				return false
 			}
@@ -1334,7 +1334,7 @@ func consumeDevinFramesToInteractions(body io.Reader, model, chatModelUID string
 			if json.Valid([]byte(tc.Arguments)) {
 				fnStep, _ = sjson.SetRawBytes(fnStep, "arguments", []byte(tc.Arguments))
 			} else {
-				fnStep, _ = translatorcommon.SetStringWithoutHTMLEscape(fnStep, "arguments", tc.Arguments)
+				fnStep, _ = oagmsg.SetStringWithoutHTMLEscape(fnStep, "arguments", tc.Arguments)
 			}
 		}
 		steps = append(steps, fnStep)
@@ -1676,11 +1676,11 @@ func parseInteractionsPayload(payload, originalRequest []byte) (
 	if toolsRes.IsArray() {
 		appendDevinTool := func(t gjson.Result) {
 			name := t.Get("name").String()
-			if name == "" || translatorcommon.IsDevinCodexAppAutomationUpdate("", name) {
+			if name == "" || helps.IsDevinCodexAppAutomationUpdate("", name) {
 				return
 			}
 			desc := t.Get("description").String()
-			desc = translatorcommon.SanitizeDevinToolDescription(name, desc)
+			desc = helps.SanitizeDevinToolDescription(name, desc)
 			params := t.Get("parameters").Raw
 			if len(params) == 0 {
 				params = t.Get("parametersJsonSchema").Raw

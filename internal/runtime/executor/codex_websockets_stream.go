@@ -493,7 +493,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 				}
 				if bufferedBytes+frameBytes <= codexBootstrapMaxBufferedBytes {
 					bufferedBytes += frameBytes
-					bufferedChunks = append(bufferedChunks, currentChunks...)
+					bufferedChunks = append(bufferedChunks, codexBootstrapCommittingChunks(currentChunks)...)
 					continue
 				}
 				helps.LogWithRequestID(ctx).Debugf("codex websockets executor: bootstrap byte limit reached after %d messages / %d bytes, releasing stream without overload probing", bufferedFrames, bufferedBytes)

@@ -87,7 +87,7 @@ func (h *InteractionsHandler) parseStreamChunkWithState(rawJSON []byte, state *s
 		}
 		return []StreamDelta{{
 			Type:          EventToolStart,
-			ToolCallID:    item.Get("call_id").String(),
+			ToolCallID:    firstExisting(item, "call_id", "id").String(),
 			ToolName:      item.Get("name").String(),
 			ToolType:      toolType,
 			ToolIndex:     int(root.Get("output_index").Int()),
@@ -186,7 +186,7 @@ func (h *InteractionsHandler) parseStreamChunkWithState(rawJSON []byte, state *s
 			if itemType == "custom_tool_call" {
 				toolType = "custom"
 			}
-			callID := item.Get("call_id").String()
+			callID := firstExisting(item, "call_id", "id").String()
 			name := item.Get("name").String()
 			args := item.Get("arguments").String()
 			if itemType == "custom_tool_call" {

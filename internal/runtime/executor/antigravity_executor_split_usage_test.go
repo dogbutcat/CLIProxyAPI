@@ -26,6 +26,14 @@ data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"text":""}
 
 `
 
+const antigravityPostTerminalTailSSE = `data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"OK"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":4,"candidatesTokenCount":72,"thoughtsTokenCount":71,"totalTokenCount":76},"modelVersion":"gemini-3.7-flash","responseId":"resp-tail"},"traceId":"trace-tail"}
+
+data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"","thought":true}]}}],"usageMetadata":{"promptTokenCount":4,"candidatesTokenCount":72,"thoughtsTokenCount":71,"totalTokenCount":76},"modelVersion":"gemini-3.7-flash","responseId":"resp-tail"},"traceId":"trace-tail"}
+
+data: {"response":{"candidates":[{"content":{"role":"model","parts":[]}}],"usageMetadata":{"promptTokenCount":4,"candidatesTokenCount":72,"thoughtsTokenCount":71,"totalTokenCount":76},"modelVersion":"gemini-3.7-flash","responseId":"resp-tail"},"traceId":"trace-tail"}
+
+`
+
 // TestAntigravityStreamFinalizesSplitTerminalUsageOnce covers a terminal
 // finishReason and its usage arriving in separate chunks: the stream must carry
 // exactly one finish_reason, on the last chunk, together with the token counts.
@@ -94,5 +102,73 @@ func TestAntigravityStreamFinalizesSplitTerminalUsageOnce(t *testing.T) {
 	}
 	if got := gjson.GetBytes(terminal, "usage.prompt_tokens").Int(); got != 11 {
 		t.Fatalf("terminal prompt_tokens = %d, want 11", got)
+	}
+}
+
+func TestAntigravityStreamSuppressesPostTerminalTail(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, antigravityPostTerminalTailSSE)
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+	}))
+	defer server.Close()
+
+	executor := NewAntigravityExecutor(&config.Config{
+		Antigravity:  config.AntigravityConfig{},
+		RequestRetry: 1,
+	})
+	result, errExecute := executor.ExecuteStream(context.Background(), &cliproxyauth.Auth{
+		Metadata: map[string]any{
+			"access_token": "token-123",
+			"expired":      time.Now().Add(24 * time.Hour).Format(time.RFC3339),
+			"project_id":   "project-1",
+		},
+		Attributes: map[string]string{"base_url": server.URL},
+	}, cliproxyexecutor.Request{
+		Model:   "gemini-3.7-flash",
+		Payload: []byte(`{"model":"gemini-3.7-flash","messages":[{"role":"user","content":"hello"}],"stream":true}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat:   sdktranslator.FormatOpenAI,
+		ResponseFormat: sdktranslator.FormatOpenAI,
+		Stream:         true,
+	})
+	if errExecute != nil {
+		t.Fatalf("ExecuteStream() error = %v", errExecute)
+	}
+
+	var (
+		chunks       [][]byte
+		finishCount  int
+		postTerminal int
+		seenFinish   bool
+	)
+	for chunk := range result.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("unexpected stream error: %v", chunk.Err)
+		}
+		if seenFinish {
+			postTerminal++
+		}
+		if reason := gjson.GetBytes(chunk.Payload, "choices.0.finish_reason").String(); reason != "" {
+			finishCount++
+			if reason != "stop" {
+				t.Fatalf("finish_reason = %q, want stop", reason)
+			}
+			seenFinish = true
+		}
+		chunks = append(chunks, chunk.Payload)
+	}
+
+	if finishCount != 1 {
+		t.Fatalf("finish chunk count = %d, want 1; chunks=%q", finishCount, chunks)
+	}
+	if postTerminal != 0 {
+		t.Fatalf("post-terminal chunks = %d, want 0; chunks=%q", postTerminal, chunks)
+	}
+	terminal := chunks[len(chunks)-1]
+	if got := gjson.GetBytes(terminal, "usage.total_tokens").Int(); got != 76 {
+		t.Fatalf("terminal total_tokens = %d, want 76", got)
 	}
 }

@@ -189,9 +189,9 @@ func (s *responsesAPISerializer) closeOpenItemsWithTools(closeTools bool) [][]by
 
 	out = append(out, s.flushPendingTerminalSignature()...)
 	out = append(out, s.closeReasoningItem()...)
-	out = append(out, s.closeMessageItem()...)
 
 	if !closeTools {
+		out = append(out, s.closeMessageItem()...)
 		return out
 	}
 
@@ -211,6 +211,7 @@ func (s *responsesAPISerializer) closeOpenItemsWithTools(closeTools bool) [][]by
 			s.toolItemAdded[callID] = false
 		}
 	}
+	out = append(out, s.closeMessageItem()...)
 	return out
 }
 
@@ -375,7 +376,8 @@ func (s *responsesAPISerializer) handleToolStart(d StreamDelta) [][]byte {
 	if d.ToolType == streamToolTypeResponsesRawItem {
 		return s.handleRawResponsesItem(d)
 	}
-	// Close any open message content part before starting tool.
+	// Close open text before starting a tool. Interactions streams can mark a
+	// completed model_output step so its message is finalized before the tool.
 	var out [][]byte
 	if d.Signature == "" {
 		d.Signature = s.popPendingSignature()
@@ -391,6 +393,8 @@ func (s *responsesAPISerializer) handleToolStart(d StreamDelta) [][]byte {
 	if d.Signature != "" {
 		out = append(out, s.closeMessageItem()...)
 		out = append(out, s.emitDetachedReasoning(d.Signature, geminiResponsesCarrierNext, geminiResponsesCarrierFunction)...)
+	} else if boolExtraValue(d.Extra, "responses_close_message_before_tool") {
+		out = append(out, s.closeMessageItem()...)
 	} else {
 		out = append(out, s.closeMessageContentPart()...)
 	}
@@ -475,7 +479,7 @@ func (s *responsesAPISerializer) handleToolDelta(d StreamDelta) [][]byte {
 	evt, _ = sjson.SetBytes(evt, "sequence_number", s.nextSeq())
 	evt, _ = sjson.SetBytes(evt, "output_index", outputIdx)
 	evt, _ = sjson.SetBytes(evt, "item_id", s.toolItemIDs[d.ToolCallID])
-	evt, _ = sjson.SetBytes(evt, "delta", d.ToolArgs)
+	evt, _ = SetStringWithoutHTMLEscape(evt, "delta", d.ToolArgs)
 	if s.toolArgs[d.ToolCallID] == nil {
 		s.toolArgs[d.ToolCallID] = &strings.Builder{}
 	}
@@ -523,7 +527,7 @@ func (s *responsesAPISerializer) handleToolDone(d StreamDelta) [][]byte {
 		done, _ = sjson.SetBytes(done, "sequence_number", s.nextSeq())
 		done, _ = sjson.SetBytes(done, "output_index", outputIdx)
 		done, _ = sjson.SetBytes(done, "item_id", s.toolItemIDs[d.ToolCallID])
-		done, _ = sjson.SetBytes(done, "arguments", d.ToolArgs)
+		done, _ = SetStringWithoutHTMLEscape(done, "arguments", d.ToolArgs)
 		out = append(out, formatSSEEventData("response.function_call_arguments.done", done))
 		if s.toolArgs[d.ToolCallID] == nil {
 			s.toolArgs[d.ToolCallID] = &strings.Builder{}
@@ -554,7 +558,7 @@ func (s *responsesAPISerializer) emitToolArgumentsDelta(outputIdx int, callID, a
 	evt, _ = sjson.SetBytes(evt, "sequence_number", s.nextSeq())
 	evt, _ = sjson.SetBytes(evt, "output_index", outputIdx)
 	evt, _ = sjson.SetBytes(evt, "item_id", s.toolItemIDs[callID])
-	evt, _ = sjson.SetBytes(evt, "delta", args)
+	evt, _ = SetStringWithoutHTMLEscape(evt, "delta", args)
 	return formatSSEEventData("response.function_call_arguments.delta", evt)
 }
 
@@ -1021,9 +1025,9 @@ func (s *responsesAPISerializer) emitToolOutputItemDone(outputIdx int, callID, s
 		itemDone, _ = sjson.SetBytes(itemDone, "item.namespace", namespace)
 	}
 	if itemType == "custom_tool_call" {
-		itemDone, _ = sjson.SetBytes(itemDone, "item.input", unwrapCustomToolInput(args))
+		itemDone, _ = SetStringWithoutHTMLEscape(itemDone, "item.input", unwrapCustomToolInput(args))
 	} else {
-		itemDone, _ = sjson.SetBytes(itemDone, "item.arguments", args)
+		itemDone, _ = SetStringWithoutHTMLEscape(itemDone, "item.arguments", args)
 	}
 	s.rememberCompletedOutputFromEvent(itemDone)
 	return formatSSEEventData("response.output_item.done", itemDone)

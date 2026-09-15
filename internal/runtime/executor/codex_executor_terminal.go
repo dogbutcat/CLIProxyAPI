@@ -494,6 +494,99 @@ const codexBootstrapMaxBufferedFrames = 48
 // materialised the frame by the time it is consulted.
 const codexBootstrapMaxBufferedBytes = 1 << 20
 
+func codexBootstrapCommittingChunks(chunks [][]byte) [][]byte {
+	if len(chunks) == 0 {
+		return nil
+	}
+	filtered := make([][]byte, 0, len(chunks))
+	for _, chunk := range chunks {
+		if codexBootstrapChunkCommits(chunk) {
+			filtered = append(filtered, chunk)
+		}
+	}
+	return filtered
+}
+
+func codexBootstrapChunkCommits(chunk []byte) bool {
+	payload, ok := codexBootstrapSSEDataPayload(chunk)
+	if !ok {
+		return len(bytes.TrimSpace(chunk)) > 0
+	}
+	payload = bytes.TrimSpace(payload)
+	if len(payload) == 0 {
+		return false
+	}
+	if bytes.Equal(payload, []byte("[DONE]")) {
+		return true
+	}
+	parsed := gjson.ParseBytes(payload)
+	if parsed.Get("object").String() != "chat.completion.chunk" {
+		return true
+	}
+	usage := parsed.Get("usage")
+	if usage.Exists() && usage.Type != gjson.Null {
+		return true
+	}
+	choices := parsed.Get("choices")
+	if !choices.Exists() || !choices.IsArray() {
+		return true
+	}
+	choiceList := choices.Array()
+	if len(choiceList) == 0 {
+		return false
+	}
+	for _, choice := range choiceList {
+		if codexBootstrapChatChoiceCommits(choice) {
+			return true
+		}
+	}
+	return false
+}
+
+func codexBootstrapChatChoiceCommits(choice gjson.Result) bool {
+	finishReason := choice.Get("finish_reason")
+	if finishReason.Exists() && finishReason.Type != gjson.Null {
+		return true
+	}
+	delta := choice.Get("delta")
+	if !delta.Exists() || delta.Type != gjson.JSON {
+		return true
+	}
+	fields := delta.Map()
+	if len(fields) == 0 {
+		return false
+	}
+	for name := range fields {
+		if name != "role" {
+			return true
+		}
+	}
+	return false
+}
+
+func codexBootstrapSSEDataPayload(chunk []byte) ([]byte, bool) {
+	trimmed := bytes.TrimSpace(chunk)
+	if !bytes.HasPrefix(trimmed, []byte("data:")) {
+		return nil, false
+	}
+	var payload []byte
+	for _, line := range bytes.Split(trimmed, []byte("\n")) {
+		line = bytes.TrimSpace(line)
+		if !bytes.HasPrefix(line, []byte("data:")) {
+			continue
+		}
+		line = bytes.TrimSpace(bytes.TrimPrefix(line, []byte("data:")))
+		if len(payload) > 0 {
+			payload = append(payload, '\n')
+		}
+		payload = append(payload, line...)
+	}
+	if payload == nil {
+		return nil, false
+	}
+	return payload, true
+}
+
 // isCodexBootstrapBufferableEvent reports whether a frame may be held back before the downstream
 // response headers are committed, i.e. whether nothing observable has happened yet.
 //

@@ -229,8 +229,8 @@ func TestTranslateRequestWithAPIKeyModelCompatibility_InvokesPluginNormalizers(t
 			summaryDisplayInHook = gjson.GetBytes(body, "thinking.display").String()
 		},
 	}
-	sdktranslator.SetPluginHooks(hooks)
-	t.Cleanup(func() { sdktranslator.SetPluginHooks(nil) })
+	oagmsg.SetPluginHooks(hooks)
+	t.Cleanup(func() { oagmsg.SetPluginHooks(nil) })
 
 	cfg := &config.Config{}
 	payload := []byte(`{"model":"claude-3-5-sonnet","messages":[{"role":"user","content":"hello"}],"reasoning_effort":"high","include_reasoning":true}`)

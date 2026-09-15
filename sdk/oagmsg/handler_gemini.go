@@ -72,12 +72,62 @@ func (h *GeminiHandler) parseRequestFromRootWithOptions(root gjson.Result, optio
 		for _, t := range v.Array() {
 			var m map[string]any
 			if err := json.Unmarshal([]byte(t.Raw), &m); err == nil {
-				req.Tools = append(req.Tools, m)
+				req.Tools = append(req.Tools, expandGeminiRequestTool(m)...)
 			}
 		}
 	}
 
 	return req
+}
+
+func expandGeminiRequestTool(tool map[string]any) []map[string]any {
+	builtinTools := geminiBuiltinToolsToInteractions(tool)
+	if len(builtinTools) == 0 {
+		return []map[string]any{tool}
+	}
+	result := make([]map[string]any, 0, len(builtinTools)+1)
+	result = append(result, builtinTools...)
+	if functionTool, ok := geminiFunctionToolWithoutBuiltins(tool); ok {
+		result = append(result, functionTool)
+	}
+	return result
+}
+
+func geminiBuiltinToolsToInteractions(tool map[string]any) []map[string]any {
+	var result []map[string]any
+	for _, spec := range geminiBuiltinToolSpecs() {
+		for _, key := range spec.geminiKeys {
+			value, ok := tool[key]
+			if !ok {
+				continue
+			}
+			entry := map[string]any{"type": spec.responsesType}
+			if options, okOptions := value.(map[string]any); okOptions && len(options) > 0 {
+				entry[spec.responsesKey] = options
+			}
+			result = append(result, entry)
+			break
+		}
+	}
+	return result
+}
+
+func geminiFunctionToolWithoutBuiltins(tool map[string]any) (map[string]any, bool) {
+	cleaned := cloneToolMap(tool)
+	for _, spec := range geminiBuiltinToolSpecs() {
+		for _, key := range spec.geminiKeys {
+			delete(cleaned, key)
+		}
+	}
+	if name := strings.TrimSpace(stringValue(cleaned["name"])); name != "" {
+		return cleaned, true
+	}
+	for _, key := range []string{"functionDeclarations", "function_declarations"} {
+		if len(anySlice(cleaned[key])) > 0 {
+			return cleaned, true
+		}
+	}
+	return nil, false
 }
 
 // ParseMessages extracts messages from Gemini generateContent JSON.

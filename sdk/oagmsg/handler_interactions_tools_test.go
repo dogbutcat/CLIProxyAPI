@@ -3,12 +3,19 @@ package oagmsg
 import (
 	"encoding/json"
 	"reflect"
+	"strings"
 	"testing"
 
 	responses_to_claude "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/claude/openai/responses"
 	responses_to_chat "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/openai/openai/responses"
 	"github.com/tidwall/gjson"
 )
+
+func containsHTMLUnicodeEscape(value string) bool {
+	return strings.Contains(value, `\u003c`) ||
+		strings.Contains(value, `\u003e`) ||
+		strings.Contains(value, `\u0026`)
+}
 
 func TestResponsesAdditionalToolsToChatToolsRequestOracle(t *testing.T) {
 	raw := []byte(`{
@@ -59,6 +66,63 @@ func TestResponsesAdditionalToolsToChatToolsRequestOracle(t *testing.T) {
 	}
 	if got := root.Get(`tools.#(function.name=="collaboration__send").function.parameters.properties.input.type`).String(); got != "string" {
 		t.Fatalf("custom input schema type = %q, want string", got)
+	}
+}
+
+func TestResponsesOrphanToolOutputsBecomeUserTextForStrictTargets(t *testing.T) {
+	raw := []byte(`{
+		"model":"gpt-test",
+		"input":[
+			{"type":"function_call_output","id":"fco_orphan","call_id":"call_missing","output":[{"type":"output_text","text":"orphan output"}]},
+			{"type":"message","role":"user","content":[{"type":"input_text","text":"next turn"}]}
+		]
+	}`)
+
+	gemini := TranslateRequest(FormatOpenAIResponse, FormatGemini, "gemini-test", raw, false)
+	if got := gjson.GetBytes(gemini, "contents.0.parts.0.text").String(); got != "orphan output" {
+		t.Fatalf("gemini orphan text = %q, want orphan output; body=%s", got, gemini)
+	}
+	if got := gjson.GetBytes(gemini, "contents.0.parts.1.text").String(); got != "next turn" {
+		t.Fatalf("gemini next text = %q, want next turn; body=%s", got, gemini)
+	}
+	if gjson.GetBytes(gemini, "contents.0.parts.0.functionResponse").Exists() {
+		t.Fatalf("orphan output became Gemini functionResponse: %s", gemini)
+	}
+
+	antigravity := TranslateRequest(FormatOpenAIResponse, FormatAntigravity, "gemini-test", raw, false)
+	if got := gjson.GetBytes(antigravity, "request.contents.0.parts.0.text").String(); got != "orphan output" {
+		t.Fatalf("antigravity orphan text = %q, want orphan output; body=%s", got, antigravity)
+	}
+	if gjson.GetBytes(antigravity, "request.contents.0.parts.0.functionResponse").Exists() {
+		t.Fatalf("orphan output became Antigravity functionResponse: %s", antigravity)
+	}
+}
+
+func TestResponsesToolArgumentsPreserveHTMLCharacters(t *testing.T) {
+	raw := []byte(`{
+		"model":"gpt-test",
+		"input":[
+			{"type":"function_call","call_id":"call_html","name":"render","arguments":"{\"html\":\"<div>&</div>\"}"},
+			{"type":"custom_tool_call","call_id":"call_custom","name":"exec","input":"echo '<div>&</div>'"}
+		]
+	}`)
+
+	req, err := (&InteractionsHandler{}).ParseRequest(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := (&InteractionsHandler{}).SerializeMessages(req.Messages)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := gjson.GetBytes(out, "0.arguments").String(); got != `{"html":"<div>&</div>"}` {
+		t.Fatalf("function arguments = %q, want raw HTML chars; body=%s", got, out)
+	}
+	if got := gjson.GetBytes(out, "1.input").String(); got != "echo '<div>&</div>'" {
+		t.Fatalf("custom input = %q, want raw HTML chars; body=%s", got, out)
+	}
+	if bytes := string(out); bytes == "" || containsHTMLUnicodeEscape(bytes) {
+		t.Fatalf("serialized tool carriers contain escaped HTML characters: %s", out)
 	}
 }
 
@@ -262,17 +326,11 @@ func TestResponsesToOpenAIChatCustomHistoryEndToEnd(t *testing.T) {
 	if got := root.Get(`tools.#(function.name=="mcp__node_repl__js").function.name`).String(); got != "mcp__node_repl__js" {
 		t.Fatalf("namespace tool name = %q, want mcp__node_repl__js; output=%s", got, out)
 	}
-	if root.Get("tool_choice.function").Exists() {
-		t.Fatalf("tool_choice.function exists; want upstream-preserved Responses object shape; output=%s", out)
-	}
 	if got := root.Get("tool_choice.type").String(); got != "function" {
 		t.Fatalf("tool_choice.type = %q, want function; output=%s", got, out)
 	}
-	if got := root.Get("tool_choice.name").String(); got != "js" {
-		t.Fatalf("tool_choice.name = %q, want js; output=%s", got, out)
-	}
-	if got := root.Get("tool_choice.namespace").String(); got != "mcp__node_repl" {
-		t.Fatalf("tool_choice.namespace = %q, want mcp__node_repl; output=%s", got, out)
+	if got := root.Get("tool_choice.function.name").String(); got != "mcp__node_repl__js" {
+		t.Fatalf("tool_choice.function.name = %q, want mcp__node_repl__js; output=%s", got, out)
 	}
 	if got := root.Get("messages.1.tool_calls.0.function.name").String(); got != "exec" {
 		t.Fatalf("custom call name = %q, want exec; output=%s", got, out)

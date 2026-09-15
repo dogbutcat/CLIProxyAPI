@@ -77,14 +77,8 @@ func TestPrepareXAIResponsesToolsNormalizesClaudeWebSearchToolChoice(t *testing.
 
 	prepared, _ := PrepareXAIResponsesTools(body)
 	choice := gjson.GetBytes(prepared, "tool_choice")
-	if got := choice.Get("type").String(); got != "allowed_tools" {
-		t.Fatalf("tool_choice.type = %q, want allowed_tools; body=%s", got, prepared)
-	}
-	if got := choice.Get("mode").String(); got != "required" {
-		t.Fatalf("tool_choice.mode = %q, want required; body=%s", got, prepared)
-	}
-	if got := choice.Get("tools.0.type").String(); got != "web_search" {
-		t.Fatalf("tool_choice.tools.0.type = %q, want web_search; body=%s", got, prepared)
+	if choice.Type != gjson.String || choice.String() != "required" {
+		t.Fatalf("tool_choice = %s, want string required; body=%s", choice.Raw, prepared)
 	}
 	if got := gjson.GetBytes(prepared, "tools.0.type").String(); got != "web_search" {
 		t.Fatalf("tools.0.type = %q, want web_search; body=%s", got, prepared)

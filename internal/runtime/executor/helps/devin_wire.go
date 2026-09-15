@@ -20,7 +20,6 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/cache"
-	translatorcommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/common"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	"google.golang.org/protobuf/encoding/protowire"
 )
@@ -445,7 +444,7 @@ func BuildDevinGetChatMessageRequest(
 
 	// 6. Repeated Tools (Field 10)
 	for _, tool := range tools {
-		if tool.Name == "" || translatorcommon.IsDevinCodexAppAutomationUpdate("", tool.Name) {
+		if tool.Name == "" || IsDevinCodexAppAutomationUpdate("", tool.Name) {
 			continue
 		}
 		var tBytes []byte
@@ -460,7 +459,7 @@ func BuildDevinGetChatMessageRequest(
 		if strings.Contains(desc, "Takes a task_id parameter identifying the task") {
 			desc = strings.ReplaceAll(desc, "Takes a task_id parameter identifying the task", "Takes a taskId parameter identifying the task")
 		}
-		desc = translatorcommon.SanitizeDevinToolDescription(tool.Name, desc)
+		desc = SanitizeDevinToolDescription(tool.Name, desc)
 		if desc != "" {
 			tBytes = protowire.AppendTag(tBytes, 2, protowire.BytesType)
 			tBytes = protowire.AppendString(tBytes, desc)
@@ -1168,14 +1167,14 @@ func BuildDevinUpstreamLogBody(
 
 	var toolItems []DevinToolLogItem
 	for _, t := range tools {
-		if t.Name == "" || translatorcommon.IsDevinCodexAppAutomationUpdate("", t.Name) {
+		if t.Name == "" || IsDevinCodexAppAutomationUpdate("", t.Name) {
 			continue
 		}
 		desc := t.Description
 		if strings.Contains(desc, "Takes a task_id parameter identifying the task") {
 			desc = strings.ReplaceAll(desc, "Takes a task_id parameter identifying the task", "Takes a taskId parameter identifying the task")
 		}
-		desc = translatorcommon.SanitizeDevinToolDescription(t.Name, desc)
+		desc = SanitizeDevinToolDescription(t.Name, desc)
 		var params json.RawMessage
 		if len(t.Parameters) > 0 && json.Valid(t.Parameters) {
 			params = json.RawMessage(t.Parameters)

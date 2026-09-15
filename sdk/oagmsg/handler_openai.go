@@ -44,11 +44,17 @@ func (h *OpenAIHandler) ParseRequest(rawJSON []byte) (*UnifiedRequest, error) {
 		req.TopP = &t
 	}
 	if v := root.Get("max_completion_tokens"); v.Exists() {
-		t := int(v.Int())
-		req.MaxTokens = &t
+		req.maxTokens = requestMaxTokensMetadata{present: true, isNull: v.Type == gjson.Null, raw: []byte(v.Raw)}
+		if v.Type != gjson.Null {
+			t := int(v.Int())
+			req.MaxTokens = &t
+		}
 	} else if v := root.Get("max_tokens"); v.Exists() {
-		t := int(v.Int())
-		req.MaxTokens = &t
+		req.maxTokens = requestMaxTokensMetadata{present: true, isNull: v.Type == gjson.Null, raw: []byte(v.Raw)}
+		if v.Type != gjson.Null {
+			t := int(v.Int())
+			req.MaxTokens = &t
+		}
 	}
 	if v := root.Get("stop"); v.Exists() {
 		if v.IsArray() {
@@ -529,16 +535,18 @@ func openAIToolResultMessages(msg OagMessage) []map[string]any {
 		var toolMsg map[string]any
 		switch tr := block.(type) {
 		case ToolResultBlock:
+			content := normalizeOpenAIToolResultContent(tr.Content)
 			toolMsg = map[string]any{
 				"role":         "tool",
 				"tool_call_id": tr.ToolUseID,
-				"content":      normalizeOpenAIToolResultContent(tr.Content),
+				"content":      content,
 			}
 		case CustomToolResultBlock:
+			content := normalizeOpenAICustomToolResultContent(tr)
 			toolMsg = map[string]any{
 				"role":         "tool",
 				"tool_call_id": tr.ToolUseID,
-				"content":      normalizeOpenAICustomToolResultContent(tr),
+				"content":      content,
 			}
 		}
 		if toolMsg == nil {
@@ -754,6 +762,8 @@ func (h *OpenAIHandler) SerializeRequest(req *UnifiedRequest) ([]byte, error) {
 	}
 	if req.MaxTokens != nil {
 		out["max_tokens"] = *req.MaxTokens
+	} else if req.maxTokens.present && req.maxTokens.isNull {
+		out["max_tokens"] = nil
 	}
 	if len(req.Stop) > 0 {
 		out["stop"] = req.Stop
@@ -763,7 +773,7 @@ func (h *OpenAIHandler) SerializeRequest(req *UnifiedRequest) ([]byte, error) {
 		out["tools"] = normalizedTools
 		if req.ToolChoice != nil {
 			if req.SourceFormat == FormatOpenAIResponse || req.SourceFormat == FormatCodex {
-				out["tool_choice"] = normalizeResponsesToolChoiceToOpenAI(req.ToolChoice)
+				out["tool_choice"] = normalizeResponsesToolChoiceToOpenAI(req.ToolChoice, normalizedTools)
 			} else {
 				out["tool_choice"] = NormalizeToolChoiceToOpenAI(req.ToolChoice)
 			}

@@ -444,6 +444,7 @@ func (s *anthropicStreamSerializer) Serialize(delta StreamDelta) [][]byte {
 		results = append(results, appendSSEEvent("ping", []byte(`{"type":"ping"}`)))
 
 	case EventError:
+		results = append(results, s.closeOpenBlocksForError()...)
 		errJSON := []byte(`{"type":"error","error":{"type":"","message":""}}`)
 		errJSON, _ = sjson.SetBytes(errJSON, "error.type", delta.ErrorType)
 		errJSON, _ = sjson.SetBytes(errJSON, "error.message", delta.ErrorMessage)
@@ -585,6 +586,24 @@ func (s *anthropicStreamSerializer) flushBufferedInterleave() [][]byte {
 	for _, delta := range pending {
 		results = append(results, s.Serialize(delta)...)
 	}
+	return results
+}
+
+func (s *anthropicStreamSerializer) closeOpenBlocksForError() [][]byte {
+	var results [][]byte
+	if s.thinkBlockIndex >= 0 {
+		results = append(results, s.closeBlock(s.thinkBlockIndex)...)
+		s.thinkBlockIndex = -1
+	}
+	if s.textBlockIndex >= 0 {
+		results = append(results, s.closeBlock(s.textBlockIndex)...)
+		s.textBlockIndex = -1
+	}
+	for _, idx := range s.sortedActiveToolBlockIndexes() {
+		results = append(results, s.closeBlock(idx)...)
+	}
+	s.activeToolBlocks = make(map[int]bool)
+	s.toolBlockIndexes = make(map[int]int)
 	return results
 }
 
