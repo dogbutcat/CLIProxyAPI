@@ -189,6 +189,68 @@ func TestRuntimeTranslateStreamWaitsForOpenAIDoneAfterFinishReason(t *testing.T)
 	}
 }
 
+func TestRuntimeTranslateStreamSuppressesGeminiDeltasAfterDeferredTerminal(t *testing.T) {
+	var state any
+	first := TranslateStream(context.Background(), FormatGemini, FormatOpenAI, "gemini-test", nil, nil, []byte(`data: {
+		"responseId":"gemini-terminal",
+		"modelVersion":"gemini-test",
+		"candidates":[{"content":{"parts":[{"text":"OK"}]},"finishReason":"STOP"}],
+		"usageMetadata":{"promptTokenCount":4,"candidatesTokenCount":1,"totalTokenCount":5}
+	}`), &state)
+	joinedFirst := string(joinRuntimeOutputs(first))
+	if !strings.Contains(joinedFirst, `"content":"OK"`) || !strings.Contains(joinedFirst, `"finish_reason":"stop"`) {
+		t.Fatalf("terminal output malformed: %s", joinedFirst)
+	}
+
+	lateText := TranslateStream(context.Background(), FormatGemini, FormatOpenAI, "gemini-test", nil, nil, []byte(`data: {
+		"responseId":"gemini-terminal",
+		"modelVersion":"gemini-test",
+		"candidates":[{"content":{"parts":[{"text":"late"}]}}],
+		"usageMetadata":{"promptTokenCount":4,"candidatesTokenCount":2,"totalTokenCount":6}
+	}`), &state)
+	if len(lateText) != 0 {
+		t.Fatalf("post-terminal Gemini delta emitted %d chunk(s): %s", len(lateText), joinRuntimeOutputs(lateText))
+	}
+
+	done := TranslateStream(context.Background(), FormatGemini, FormatOpenAI, "gemini-test", nil, nil, []byte(`data: [DONE]`), &state)
+	if len(done) != 0 {
+		t.Fatalf("post-terminal DONE emitted %d chunk(s): %s", len(done), joinRuntimeOutputs(done))
+	}
+}
+
+func TestRuntimeTranslateStreamSuppressesAntigravityDeltasAfterDeferredTerminal(t *testing.T) {
+	var state any
+	first := TranslateStream(context.Background(), FormatAntigravity, FormatOpenAI, "gemini-3.7-flash-high", nil, nil, []byte(`data: {
+		"response":{
+			"responseId":"antigravity-terminal",
+			"modelVersion":"gemini-3.7-flash",
+			"candidates":[{"content":{"role":"model","parts":[{"text":"OK"}]},"finishReason":"STOP"}],
+			"usageMetadata":{"promptTokenCount":4,"candidatesTokenCount":72,"thoughtsTokenCount":71,"totalTokenCount":76}
+		}
+	}`), &state)
+	joinedFirst := string(joinRuntimeOutputs(first))
+	if !strings.Contains(joinedFirst, `"content":"OK"`) || !strings.Contains(joinedFirst, `"finish_reason":"stop"`) {
+		t.Fatalf("terminal output malformed: %s", joinedFirst)
+	}
+
+	lateStart := TranslateStream(context.Background(), FormatAntigravity, FormatOpenAI, "gemini-3.7-flash-high", nil, nil, []byte(`data: {
+		"response":{
+			"responseId":"antigravity-terminal",
+			"modelVersion":"gemini-3.7-flash",
+			"candidates":[{"content":{"role":"model","parts":[{"text":"","thought":true}]}}],
+			"usageMetadata":{"promptTokenCount":4,"candidatesTokenCount":72,"thoughtsTokenCount":71,"totalTokenCount":76}
+		}
+	}`), &state)
+	if len(lateStart) != 0 {
+		t.Fatalf("post-terminal Antigravity delta emitted %d chunk(s): %s", len(lateStart), joinRuntimeOutputs(lateStart))
+	}
+
+	done := TranslateStream(context.Background(), FormatAntigravity, FormatOpenAI, "gemini-3.7-flash-high", nil, nil, []byte(`data: [DONE]`), &state)
+	if len(done) != 0 {
+		t.Fatalf("post-terminal DONE emitted %d chunk(s): %s", len(done), joinRuntimeOutputs(done))
+	}
+}
+
 func TestRuntimeTranslateStreamPreservesCompleteToolArgsToAnthropic(t *testing.T) {
 	original := []byte(`{
 		"model":"gemini-pro-agent",
@@ -271,6 +333,29 @@ func TestRuntimeTranslateStreamPreservesCompleteToolArgsToAnthropic(t *testing.T
 			}
 		})
 	}
+}
+
+func TestRuntimeTranslateStreamPreservesInteractionsToolDoneToGemini(t *testing.T) {
+	var state any
+	events := [][]byte{
+		[]byte(`data: {"event_type":"interaction.created","interaction":{"id":"i1","model":"gemini-3.1-flash-lite"}}`),
+		[]byte(`data: {"event_type":"step.start","index":0,"step":{"type":"function_call","id":"call_1","signature":"sig_1","name":"get_weather","arguments":{}}}`),
+		[]byte(`data: {"event_type":"step.delta","index":0,"delta":{"type":"arguments_delta","arguments":"{\"location\":\"北京\"}"}}`),
+		[]byte(`data: {"event_type":"step.stop","index":0}`),
+		[]byte(`data: {"event_type":"interaction.completed","interaction":{"id":"i1","status":"requires_action","usage":{"total_input_tokens":2,"total_output_tokens":3,"total_tokens":5,"total_cached_tokens":1},"model":"gemini-3.1-flash-lite"}}`),
+		[]byte(`data: [DONE]`),
+	}
+	var outputs [][]byte
+	for _, event := range events {
+		outputs = append(outputs, TranslateStream(context.Background(), FormatInteractions, FormatGemini, "gemini-3.1-flash-lite", nil, nil, event, &state)...)
+	}
+	joined := string(joinRuntimeOutputs(outputs))
+	assertContains(t, joined, `"functionCall"`)
+	assertContains(t, joined, `"name":"get_weather"`)
+	assertContains(t, joined, `"location":"北京"`)
+	assertContains(t, joined, `"thoughtSignature":"sig_1"`)
+	assertContains(t, joined, `"finishReason":"STOP"`)
+	assertContains(t, joined, `"totalTokenCount":5`)
 }
 
 func joinRuntimeOutputs(values [][]byte) []byte {

@@ -78,6 +78,62 @@ data: {"event_type":"interaction.completed","interaction":{"status":"completed",
 	}
 }
 
+func TestGoogleInteractionsStreamParserStatefulToolLifecycle(t *testing.T) {
+	handler := &GoogleInteractionsHandler{}
+	state := &streamParseState{}
+
+	deltas, err := handler.parseStreamChunkWithState([]byte(`{"event_type":"step.start","index":2,"step":{"type":"function_call","id":"step_1","call_id":"call_1","name":"lookup"}}`), state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(deltas) != 1 || deltas[0].Type != EventToolStart || deltas[0].ToolCallID != "call_1" || deltas[0].ToolName != "lookup" {
+		t.Fatalf("tool start deltas = %#v", deltas)
+	}
+
+	deltas, err = handler.parseStreamChunkWithState([]byte(`{"event_type":"step.delta","index":2,"delta":{"type":"arguments_delta","arguments":"{\"q\":\"x\"}"}}`), state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(deltas) != 1 || deltas[0].Type != EventToolDelta || deltas[0].ToolCallID != "call_1" || deltas[0].ToolName != "lookup" || deltas[0].ToolArgs != `{"q":"x"}` {
+		t.Fatalf("tool delta deltas = %#v", deltas)
+	}
+
+	deltas, err = handler.parseStreamChunkWithState([]byte(`{"event_type":"step.stop","index":2}`), state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(deltas) != 1 || deltas[0].Type != EventToolDone || deltas[0].ToolCallID != "call_1" || deltas[0].ToolName != "lookup" {
+		t.Fatalf("tool done deltas = %#v", deltas)
+	}
+}
+
+func TestGoogleInteractionsStreamParserIgnoresNonToolStepStop(t *testing.T) {
+	handler := &GoogleInteractionsHandler{}
+	state := &streamParseState{}
+
+	if _, err := handler.parseStreamChunkWithState([]byte(`{"event_type":"step.start","index":1,"step":{"type":"model_output","id":"step_text"}}`), state); err != nil {
+		t.Fatal(err)
+	}
+	deltas, err := handler.parseStreamChunkWithState([]byte(`{"event_type":"step.stop","index":1}`), state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(deltas) != 0 {
+		t.Fatalf("non-tool stop deltas = %#v", deltas)
+	}
+}
+
+func TestGoogleInteractionsStreamParserResponseFailedAlias(t *testing.T) {
+	handler := &GoogleInteractionsHandler{}
+	deltas, err := handler.ParseStreamChunk([]byte(`{"event_type":"response.failed","error":{"message":"server overload","code":"503"}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(deltas) != 1 || deltas[0].Type != EventError || deltas[0].ErrorType != "503" || deltas[0].ErrorMessage != "server overload" {
+		t.Fatalf("failed deltas = %#v", deltas)
+	}
+}
+
 func TestGoogleInteractionsRequestRoundTrip(t *testing.T) {
 	handler := &GoogleInteractionsHandler{}
 	req, err := handler.ParseRequest([]byte(interactionsRequestToolCall))

@@ -10,6 +10,10 @@ var _ StreamHandler = (*GoogleInteractionsHandler)(nil)
 
 // ParseStreamChunk parses Google Interactions interaction.*/step.* events.
 func (h *GoogleInteractionsHandler) ParseStreamChunk(rawJSON []byte) ([]StreamDelta, error) {
+	return h.parseStreamChunkWithState(rawJSON, &streamParseState{})
+}
+
+func (h *GoogleInteractionsHandler) parseStreamChunkWithState(rawJSON []byte, state *streamParseState) ([]StreamDelta, error) {
 	payload := googleInteractionSSEPayload(rawJSON)
 	if len(payload) == 0 {
 		return nil, nil
@@ -24,13 +28,29 @@ func (h *GoogleInteractionsHandler) ParseStreamChunk(rawJSON []byte) ([]StreamDe
 		}}, nil
 	case "step.start":
 		step := root.Get("step")
-		if step.Get("type").String() != "function_call" {
+		index := int(root.Get("index").Int())
+		stepType := step.Get("type").String()
+		if state != nil {
+			state.googleInteractions.rememberStep(index, googleInteractionsStepState{
+				stepType: stepType,
+				callID:   firstExisting(step, "call_id", "id").String(),
+				name:     step.Get("name").String(),
+				toolType: "function",
+			})
+		}
+		if stepType != "function_call" {
 			return nil, nil
 		}
+		extra := map[string]any(nil)
+		if state != nil && state.googleInteractions.modelOutputStopped {
+			extra = map[string]any{"responses_close_message_before_tool": true}
+			state.googleInteractions.modelOutputStopped = false
+		}
 		return []StreamDelta{{
-			Type: EventToolStart, ToolIndex: int(root.Get("index").Int()),
+			Type: EventToolStart, ToolIndex: index,
 			ToolCallID: firstExisting(step, "call_id", "id").String(), ToolName: step.Get("name").String(), ToolType: "function",
 			Signature: firstExisting(step, "signature", "thought_signature", "thoughtSignature").String(),
+			Extra:     extra,
 		}}, nil
 	case "step.delta":
 		delta := root.Get("delta")
@@ -49,12 +69,34 @@ func (h *GoogleInteractionsHandler) ParseStreamChunk(rawJSON []byte) ([]StreamDe
 				return []StreamDelta{{Type: EventThinkingDelta, Signature: signature, BlockIndex: index}}, nil
 			}
 		case "arguments_delta":
-			return []StreamDelta{{Type: EventToolDelta, ToolIndex: index, ToolArgs: delta.Get("arguments").String()}}, nil
+			step := googleInteractionStepStateAt(state, index)
+			return []StreamDelta{{
+				Type: EventToolDelta, ToolIndex: index,
+				ToolCallID: step.callID, ToolName: step.name, ToolType: step.toolType,
+				ToolArgs: delta.Get("arguments").String(),
+			}}, nil
 		case "function_result":
 			return nil, nil
 		}
 	case "step.stop":
-		return []StreamDelta{{Type: EventToolDone, ToolIndex: int(root.Get("index").Int())}}, nil
+		index := int(root.Get("index").Int())
+		step := googleInteractionStepStateAt(state, index)
+		if step.stepType != "function_call" {
+			if state != nil && step.stepType == "model_output" {
+				state.googleInteractions.modelOutputStopped = true
+			}
+			if state != nil {
+				state.googleInteractions.forgetStep(index)
+			}
+			return nil, nil
+		}
+		if state != nil {
+			state.googleInteractions.forgetStep(index)
+		}
+		return []StreamDelta{{
+			Type: EventToolDone, ToolIndex: index,
+			ToolCallID: step.callID, ToolName: step.name, ToolType: step.toolType,
+		}}, nil
 	case "interaction.completed":
 		interaction := root.Get("interaction")
 		deltas := []StreamDelta{{Type: EventDone, FinishReason: googleInteractionFinishReason(interaction)}}
@@ -62,9 +104,13 @@ func (h *GoogleInteractionsHandler) ParseStreamChunk(rawJSON []byte) ([]StreamDe
 			deltas = append(deltas, StreamDelta{Type: EventUsage, Usage: googleInteractionUsage(usage)})
 		}
 		return deltas, nil
-	case "interaction.failed":
+	case "interaction.failed", "response.failed":
 		errorValue := root.Get("error")
-		return []StreamDelta{{Type: EventError, ErrorType: errorValue.Get("type").String(), ErrorMessage: errorValue.Get("message").String()}}, nil
+		return []StreamDelta{{
+			Type:         EventError,
+			ErrorType:    firstExisting(errorValue, "type", "code").String(),
+			ErrorMessage: errorValue.Get("message").String(),
+		}}, nil
 	case "finish":
 		return []StreamDelta{{Type: EventDone, FinishReason: "stop"}}, nil
 	}
@@ -94,4 +140,32 @@ func googleInteractionSSEPayload(rawJSON []byte) []byte {
 		}
 	}
 	return nil
+}
+
+func (s *googleInteractionsStreamParseState) rememberStep(index int, step googleInteractionsStepState) {
+	if s.steps == nil {
+		s.steps = make(map[int]googleInteractionsStepState)
+	}
+	if step.toolType == "" && step.stepType == "function_call" {
+		step.toolType = "function"
+	}
+	s.steps[index] = step
+}
+
+func (s *googleInteractionsStreamParseState) forgetStep(index int) {
+	if s.steps == nil {
+		return
+	}
+	delete(s.steps, index)
+}
+
+func googleInteractionStepStateAt(state *streamParseState, index int) googleInteractionsStepState {
+	if state == nil || state.googleInteractions.steps == nil {
+		return googleInteractionsStepState{toolType: "function"}
+	}
+	step := state.googleInteractions.steps[index]
+	if step.toolType == "" && step.stepType == "function_call" {
+		step.toolType = "function"
+	}
+	return step
 }

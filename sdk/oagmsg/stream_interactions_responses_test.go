@@ -80,6 +80,47 @@ func TestResponsesAPISerializer_TextLifecycle(t *testing.T) {
 	}
 }
 
+func TestResponsesAPISerializerPreservesHTMLToolArgumentChars(t *testing.T) {
+	s := newResponsesAPISerializer("gpt-test")
+	lines := s.Serialize(StreamDelta{
+		Type:       EventToolStart,
+		ToolIndex:  0,
+		ToolCallID: "call_html",
+		ToolName:   "render",
+	})
+	lines = append(lines, s.Serialize(StreamDelta{
+		Type:       EventToolDone,
+		ToolIndex:  0,
+		ToolCallID: "call_html",
+		ToolArgs:   `{"html":"<div>&</div>"}`,
+	})...)
+
+	var argumentsDone gjson.Result
+	var itemDone gjson.Result
+	for _, line := range lines {
+		data := extractSSEData(line)
+		if len(data) == 0 {
+			continue
+		}
+		if containsHTMLUnicodeEscape(string(data)) {
+			t.Fatalf("responses stream contains escaped HTML characters: %s", data)
+		}
+		root := gjson.ParseBytes(data)
+		switch root.Get("type").String() {
+		case "response.function_call_arguments.done":
+			argumentsDone = root
+		case "response.output_item.done":
+			itemDone = root
+		}
+	}
+	if got := argumentsDone.Get("arguments").String(); got != `{"html":"<div>&</div>"}` {
+		t.Fatalf("arguments.done = %q, want raw HTML chars", got)
+	}
+	if got := itemDone.Get("item.arguments").String(); got != `{"html":"<div>&</div>"}` {
+		t.Fatalf("output_item.done arguments = %q, want raw HTML chars", got)
+	}
+}
+
 func TestResponsesAPISerializer_GeminiMessageDoneKeepsOutputTextMetadata(t *testing.T) {
 	s := newResponsesAPISerializer("gemini-test")
 	s.geminiMode = true

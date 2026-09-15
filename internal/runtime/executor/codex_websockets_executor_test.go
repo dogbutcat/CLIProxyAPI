@@ -1205,7 +1205,7 @@ func TestCodexWebsocketHeadersDisabledCloakingPreservesCustomIdentity(t *testing
 		},
 	}
 
-	headers := applyCodexWebsocketHeaders(context.Background(), http.Header{}, auth, "", cfg)
+	headers := applyCodexWebsocketHeaders(context.Background(), http.Header{}, auth, "", cfg, false)
 
 	if got := headers.Get("User-Agent"); got != "custom-ua" {
 		t.Fatalf("User-Agent = %q, want custom-ua", got)

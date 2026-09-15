@@ -7,14 +7,12 @@ import (
 	"github.com/tidwall/gjson"
 )
 
-func TestResponsesToOpenAIChatPreservesResponsesToolChoiceObject(t *testing.T) {
+func TestResponsesToOpenAIChatConvertsToolChoiceToChatFunction(t *testing.T) {
 	tests := []struct {
-		name          string
-		raw           string
-		wantType      string
-		wantName      string
-		wantNamespace string
-		wantTools     []string
+		name      string
+		raw       string
+		wantName  string
+		wantTools []string
 	}{
 		{
 			name: "namespaced function choice",
@@ -35,10 +33,8 @@ func TestResponsesToOpenAIChatPreservesResponsesToolChoiceObject(t *testing.T) {
 				],
 				"tool_choice":{"type":"function","name":"spawn","namespace":"collaboration"}
 			}`,
-			wantType:      "function",
-			wantName:      "spawn",
-			wantNamespace: "collaboration",
-			wantTools:     []string{"exec", "freeform", "collaboration__spawn", "collaboration__send", "wait"},
+			wantName:  "collaboration__spawn",
+			wantTools: []string{"exec", "freeform", "collaboration__spawn", "collaboration__send", "wait"},
 		},
 		{
 			name: "first expanded declaration collision winner",
@@ -56,7 +52,6 @@ func TestResponsesToOpenAIChatPreservesResponsesToolChoiceObject(t *testing.T) {
 				],
 				"tool_choice":{"type":"custom","name":"n__x"}
 			}`,
-			wantType:  "custom",
 			wantName:  "n__x",
 			wantTools: []string{"n__x", "n__y"},
 		},
@@ -67,17 +62,11 @@ func TestResponsesToOpenAIChatPreservesResponsesToolChoiceObject(t *testing.T) {
 			out := TranslateRequest(FormatOpenAIResponse, FormatOpenAI, "gpt-5.4", []byte(tt.raw), false)
 			root := gjson.ParseBytes(out)
 
-			if root.Get("tool_choice.function").Exists() {
-				t.Fatalf("tool_choice was rewritten to Chat function form: %s", out)
+			if got := root.Get("tool_choice.type").String(); got != "function" {
+				t.Fatalf("tool_choice.type = %q, want function; output=%s", got, out)
 			}
-			if got := root.Get("tool_choice.type").String(); got != tt.wantType {
-				t.Fatalf("tool_choice.type = %q, want %q; output=%s", got, tt.wantType, out)
-			}
-			if got := root.Get("tool_choice.name").String(); got != tt.wantName {
-				t.Fatalf("tool_choice.name = %q, want %q; output=%s", got, tt.wantName, out)
-			}
-			if got := root.Get("tool_choice.namespace").String(); got != tt.wantNamespace {
-				t.Fatalf("tool_choice.namespace = %q, want %q; output=%s", got, tt.wantNamespace, out)
+			if got := root.Get("tool_choice.function.name").String(); got != tt.wantName {
+				t.Fatalf("tool_choice.function.name = %q, want %q; output=%s", got, tt.wantName, out)
 			}
 			for i, wantName := range tt.wantTools {
 				if got := root.Get("tools." + strconv.Itoa(i) + ".function.name").String(); got != wantName {

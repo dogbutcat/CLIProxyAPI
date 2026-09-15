@@ -209,7 +209,7 @@ func (s *openaiStreamSerializer) Serialize(delta StreamDelta) [][]byte {
 			tmpl, _ = sjson.SetBytes(tmpl, "choices.0.delta.tool_calls.0.function.name", delta.ToolName)
 		}
 		if delta.ToolArgs != "" {
-			tmpl, _ = sjson.SetBytes(tmpl, "choices.0.delta.tool_calls.0.function.arguments", delta.ToolArgs)
+			tmpl, _ = SetStringWithoutHTMLEscape(tmpl, "choices.0.delta.tool_calls.0.function.arguments", delta.ToolArgs)
 		}
 		return [][]byte{formatDataLine(tmpl)}
 
@@ -219,7 +219,7 @@ func (s *openaiStreamSerializer) Serialize(delta StreamDelta) [][]byte {
 		}
 		tmpl := s.newChunkTemplate()
 		tmpl, _ = sjson.SetBytes(tmpl, "choices.0.delta.tool_calls.0.index", delta.ToolIndex)
-		tmpl, _ = sjson.SetBytes(tmpl, "choices.0.delta.tool_calls.0.function.arguments", delta.ToolArgs)
+		tmpl, _ = SetStringWithoutHTMLEscape(tmpl, "choices.0.delta.tool_calls.0.function.arguments", delta.ToolArgs)
 		return [][]byte{formatDataLine(tmpl)}
 
 	case EventToolDone:
@@ -231,7 +231,7 @@ func (s *openaiStreamSerializer) Serialize(delta StreamDelta) [][]byte {
 		if delta.ToolArgs != "" {
 			tmpl := s.newChunkTemplate()
 			tmpl, _ = sjson.SetBytes(tmpl, "choices.0.delta.tool_calls.0.index", delta.ToolIndex)
-			tmpl, _ = sjson.SetBytes(tmpl, "choices.0.delta.tool_calls.0.function.arguments", delta.ToolArgs)
+			tmpl, _ = SetStringWithoutHTMLEscape(tmpl, "choices.0.delta.tool_calls.0.function.arguments", delta.ToolArgs)
 			return [][]byte{formatDataLine(tmpl)}
 		}
 		return nil

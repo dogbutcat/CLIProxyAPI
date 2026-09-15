@@ -75,6 +75,10 @@ type UnifiedRequest struct {
 	// with an equivalent request control, without making it canonical API.
 	responsesServiceTier string
 
+	// maxTokens preserves request-scoped max token field presence that cannot be
+	// represented by MaxTokens alone, notably explicit JSON null values.
+	maxTokens requestMaxTokensMetadata
+
 	// codexSourceInstructions preserves top-level Codex instructions presence so
 	// parse/serialize can distinguish an explicit field from serializer output.
 	codexSourceInstructions codexSourceInstructionsMetadata
@@ -86,6 +90,12 @@ type UnifiedRequest struct {
 	// modelInfo preserves executor-selected model capability metadata for
 	// target serializers that need request-scoped provider facts.
 	modelInfo *registry.ModelInfo
+}
+
+type requestMaxTokensMetadata struct {
+	present bool
+	isNull  bool
+	raw     []byte
 }
 
 type anthropicWebSearchRequestMetadata struct {
@@ -125,6 +135,10 @@ func requestThinkingForTarget(req *UnifiedRequest, target Format, role string, b
 	}
 	if role != "assistant" {
 		return block, false
+	}
+	if target == FormatOpenAI && (req.SourceFormat == FormatOpenAIResponse || req.SourceFormat == FormatCodex) && strings.TrimSpace(block.Thinking) != "" {
+		block.signaturePresent = true
+		return block, true
 	}
 	if req.translationOptions.PreserveThinkingBlocks {
 		block.signaturePresent = true

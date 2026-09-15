@@ -13,12 +13,14 @@ func normalizeResponsesInputToolCallOutputs(items []gjson.Result) []gjson.Result
 	}
 	pending := make([]responsesPendingToolCall, 0)
 	explicitCounts := responsesExplicitOutputCounts(items)
+	seenToolCalls := make(map[string]struct{})
 	normalized := make([]gjson.Result, 0, len(items))
 	for _, item := range items {
 		switch responsesInputItemType(item) {
 		case "function_call", "custom_tool_call":
 			callID := responsesInputCallID(item)
 			if callID != "" {
+				seenToolCalls[callID] = struct{}{}
 				pending = append(pending, responsesPendingToolCall{
 					id:   callID,
 					name: strings.TrimSpace(item.Get("name").String()),
@@ -28,16 +30,27 @@ func normalizeResponsesInputToolCallOutputs(items []gjson.Result) []gjson.Result
 				}
 			}
 		case "function_call_output", "custom_tool_call_output":
-			callID := responsesInputCallID(item)
+			callID := responsesOutputCallID(item)
 			if callID != "" {
-				explicitCounts[callID]--
-				normalized = append(normalized, responsesInputItemWithCallID(item, callID))
+				if matchIdx := matchResponsesPendingOutputByCallID(pending, callID); matchIdx >= 0 {
+					explicitCounts[callID]--
+					pending = append(pending[:matchIdx], pending[matchIdx+1:]...)
+					normalized = append(normalized, responsesInputItemWithCallID(item, callID))
+					continue
+				}
+				if _, seen := seenToolCalls[callID]; seen {
+					normalized = append(normalized, responsesInputItemWithCallID(item, callID))
+					continue
+				}
+				normalized = append(normalized, responsesInputItemAsStandaloneText(item))
 				continue
 			}
 			if matchIdx := matchResponsesPendingOutput(pending, item, explicitCounts); matchIdx >= 0 {
 				callID = pending[matchIdx].id
 				pending = append(pending[:matchIdx], pending[matchIdx+1:]...)
 				item = responsesInputItemWithCallID(item, callID)
+			} else {
+				item = responsesInputItemAsStandaloneText(item)
 			}
 		}
 		normalized = append(normalized, item)
@@ -57,11 +70,20 @@ func responsesExplicitOutputCounts(items []gjson.Result) map[string]int {
 		if itemType != "function_call_output" && itemType != "custom_tool_call_output" {
 			continue
 		}
-		if callID := responsesInputCallID(item); callID != "" {
+		if callID := responsesOutputCallID(item); callID != "" {
 			counts[callID]++
 		}
 	}
 	return counts
+}
+
+func matchResponsesPendingOutputByCallID(pending []responsesPendingToolCall, callID string) int {
+	for idx, call := range pending {
+		if call.id == callID {
+			return idx
+		}
+	}
+	return -1
 }
 
 func matchResponsesPendingOutput(pending []responsesPendingToolCall, item gjson.Result, explicitCounts map[string]int) int {
@@ -87,6 +109,17 @@ func matchResponsesPendingOutput(pending []responsesPendingToolCall, item gjson.
 	return -1
 }
 
+func responsesOutputCallID(item gjson.Result) string {
+	for _, path := range []string{"call_id", "tool_call_id", "callId"} {
+		if value := item.Get(path); value.Type == gjson.String {
+			if id := strings.TrimSpace(value.String()); id != "" {
+				return id
+			}
+		}
+	}
+	return ""
+}
+
 func responsesInputCallID(item gjson.Result) string {
 	for _, path := range []string{"call_id", "tool_call_id", "callId", "id"} {
 		if value := item.Get(path); value.Type == gjson.String {
@@ -103,6 +136,14 @@ func responsesInputItemWithCallID(item gjson.Result, callID string) gjson.Result
 		return item
 	}
 	updated, err := sjson.Set(item.Raw, "call_id", callID)
+	if err != nil {
+		return item
+	}
+	return gjson.Parse(updated)
+}
+
+func responsesInputItemAsStandaloneText(item gjson.Result) gjson.Result {
+	updated, err := sjson.Set(item.Raw, "_oagmsg_standalone_tool_output", true)
 	if err != nil {
 		return item
 	}

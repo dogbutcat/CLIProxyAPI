@@ -54,11 +54,12 @@ type streamTerminalPolicy struct {
 }
 
 type deferredStreamTerminal struct {
-	seenOutput bool
-	sawTool    bool
-	emitted    bool
-	pending    StreamDelta
-	hasPending bool
+	seenOutput     bool
+	sawTool        bool
+	emitted        bool
+	hardTerminated bool
+	pending        StreamDelta
+	hasPending     bool
 }
 
 // SessionOption configures optional behavior for a StreamTranslateSession.
@@ -105,6 +106,7 @@ type streamParseState struct {
 	anthropic            anthropicStreamParseState
 	textDeltaSeen        bool
 	gemini               geminiStreamParseState
+	googleInteractions   googleInteractionsStreamParseState
 }
 
 type anthropicStreamParseState struct {
@@ -115,6 +117,18 @@ type anthropicStreamParseState struct {
 type geminiStreamParseState struct {
 	responseID          string
 	functionCallCounter int
+}
+
+type googleInteractionsStreamParseState struct {
+	steps              map[int]googleInteractionsStepState
+	modelOutputStopped bool
+}
+
+type googleInteractionsStepState struct {
+	stepType string
+	callID   string
+	name     string
+	toolType string
 }
 
 type statefulStreamParser interface {
@@ -273,6 +287,9 @@ func (s *StreamTranslateSession) Translate(rawSSELine []byte) ([][]byte, error) 
 	var outputs [][]byte
 	sawDone := false
 	for _, delta := range deltas {
+		if s.shouldIgnoreAfterDeferredTerminal(delta) {
+			continue
+		}
 		s.captureStreamMetadata(delta)
 		if delta.Type == EventDone {
 			delta = s.prepareDoneDelta(delta)
@@ -300,6 +317,18 @@ func (s *StreamTranslateSession) Translate(rawSSELine []byte) ([][]byte, error) 
 		outputs = append(outputs, s.serializer.Flush()...)
 	}
 	return outputs, nil
+}
+
+func (s *StreamTranslateSession) shouldIgnoreAfterDeferredTerminal(delta StreamDelta) bool {
+	if !s.deferDoneUntilUsageOrEOF() || !s.deferredTerminal.hardTerminated {
+		return false
+	}
+	switch delta.Type {
+	case EventError, EventPing:
+		return false
+	default:
+		return true
+	}
 }
 
 func selectStreamTerminalPolicy(source, target Format) streamTerminalPolicy {
@@ -384,6 +413,7 @@ func (s *StreamTranslateSession) nextDeferredTerminal() (StreamDelta, bool) {
 		s.deferredTerminal.pending = StreamDelta{}
 		s.deferredTerminal.hasPending = false
 		s.deferredTerminal.emitted = true
+		s.deferredTerminal.hardTerminated = true
 		return done, true
 	}
 	if !s.deferredTerminal.seenOutput {
@@ -501,6 +531,9 @@ func (s *StreamTranslateSession) applyLegacyMiddleware(deltas []StreamDelta) []S
 					continue
 				}
 				state.argumentsEmitted = true
+				if d.ToolArgs != "" {
+					state.arguments.WriteString(d.ToolArgs)
+				}
 			}
 
 		case EventToolDone:
@@ -516,7 +549,12 @@ func (s *StreamTranslateSession) applyLegacyMiddleware(deltas []StreamDelta) []S
 				}
 				state.done = true
 				if state.argumentsEmitted {
-					continue
+					if s.targetFormat == FormatOpenAI {
+						continue
+					}
+					if d.ToolArgs == "" && shouldReplayBufferedToolArgsOnDone(s.targetFormat) {
+						d.ToolArgs = state.arguments.String()
+					}
 				}
 				if !state.announced {
 					s.ctx.SawToolCall = true
@@ -548,6 +586,15 @@ func (s *StreamTranslateSession) applyLegacyMiddleware(deltas []StreamDelta) []S
 		result = append(result, d)
 	}
 	return result
+}
+
+func shouldReplayBufferedToolArgsOnDone(target Format) bool {
+	switch resolveFormat(target) {
+	case FormatOpenAIResponse, FormatCodex, FormatInteractions, FormatInteractionsSteps:
+		return true
+	default:
+		return false
+	}
 }
 
 func (s *StreamTranslateSession) toolArgsRequireSeparateDelta(d StreamDelta) bool {

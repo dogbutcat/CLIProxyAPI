@@ -58,6 +58,50 @@ func TestNormalizeToolDefinitionsAcrossFormats(t *testing.T) {
 	}
 }
 
+func TestNormalizeGeminiBuiltinTools(t *testing.T) {
+	tests := []struct {
+		name string
+		tool map[string]any
+		want map[string]any
+	}{
+		{
+			name: "url context",
+			tool: map[string]any{"type": "url_context", "url_context": map[string]any{"max_urls": 3}},
+			want: map[string]any{"urlContext": map[string]any{"max_urls": 3}},
+		},
+		{
+			name: "code execution",
+			tool: map[string]any{"type": "code_execution", "codeExecution": map[string]any{"sandbox": true}},
+			want: map[string]any{"codeExecution": map[string]any{"sandbox": true}},
+		},
+		{
+			name: "web search alias",
+			tool: map[string]any{"type": "web_search", "google_search": map[string]any{"mode": "search"}},
+			want: map[string]any{"googleSearch": map[string]any{"mode": "search"}},
+		},
+		{
+			name: "native snake composite",
+			tool: map[string]any{"google_search": map[string]any{}, "url_context": map[string]any{"max_urls": 2}},
+			want: map[string]any{"googleSearch": map[string]any{}, "urlContext": map[string]any{"max_urls": 2}},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := NormalizeToolToGemini(tt.tool); !reflect.DeepEqual(got, tt.want) {
+				t.Fatalf("NormalizeToolToGemini() = %#v, want %#v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestNormalizeGeminiBuiltinToolToInteractions(t *testing.T) {
+	tool := map[string]any{"googleSearch": map[string]any{"mode": "search"}}
+	want := map[string]any{"type": "google_search", "google_search": map[string]any{"mode": "search"}}
+	if got := NormalizeToolToInteractions(tool); !reflect.DeepEqual(got, want) {
+		t.Fatalf("NormalizeToolToInteractions() = %#v, want %#v", got, want)
+	}
+}
+
 func TestNormalizeToolChoiceAcrossFormats(t *testing.T) {
 	anthropicChoice := map[string]any{"type": "tool", "name": "bash"}
 	wantOpenAI := map[string]any{"type": "function", "function": map[string]any{"name": "bash"}}
