@@ -175,7 +175,7 @@ func TestManagerClaudePrepareCancellationStopsWithoutCooldown(t *testing.T) {
 	}
 }
 
-func TestManagerClaudeRefreshCancellationStopsWithoutCooldown(t *testing.T) {
+func TestManagerClaudeUnauthorizedReturnsWithoutRefreshRetry(t *testing.T) {
 	unauthorized := &Error{HTTPStatus: http.StatusUnauthorized, Message: "unauthorized"}
 	tests := []struct {
 		name      string
@@ -231,16 +231,22 @@ func TestManagerClaudeRefreshCancellationStopsWithoutCooldown(t *testing.T) {
 			manager, auth, model := newClaudeCancellationTestManager(t, executor, nil)
 
 			errExecute := tt.run(ctx, manager, model)
-			if !errors.Is(errExecute, context.Canceled) {
-				t.Fatalf("error = %v, want context.Canceled", errExecute)
+			if got := statusCodeFromError(errExecute); got != http.StatusUnauthorized {
+				t.Fatalf("error status = %d, want %d; err=%v", got, http.StatusUnauthorized, errExecute)
 			}
-			if got := executor.refreshCalls.Load(); got != 1 {
-				t.Fatalf("Refresh calls = %d, want 1", got)
+			if got := executor.refreshCalls.Load(); got != 0 {
+				t.Fatalf("Refresh calls = %d, want 0", got)
 			}
 			if upstreamCalls := executor.executeCalls.Load() + executor.countCalls.Load() + executor.streamCalls.Load(); upstreamCalls != 1 {
 				t.Fatalf("upstream calls = %d, want 1", upstreamCalls)
 			}
-			requireClaudeCancellationNeutral(t, manager, auth.ID, model)
+			updated, ok := manager.GetByID(auth.ID)
+			if !ok || updated == nil {
+				t.Fatal("auth not found")
+			}
+			if state := updated.ModelStates[model]; state == nil || !state.Unavailable || state.LastError == nil || state.LastError.HTTPStatus != http.StatusUnauthorized {
+				t.Fatalf("model state = %#v, want unauthorized cooldown", state)
+			}
 		})
 	}
 }

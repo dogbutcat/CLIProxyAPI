@@ -249,10 +249,11 @@ func TestRequestScopedErrors_ActionContinue(t *testing.T) {
 	t.Cleanup(func() { quotaCooldownDisabled.Store(previous) })
 
 	m := NewManager(nil, nil, nil)
+	provider := "request-scoped-continue"
 
 	auth1 := &Auth{
-		ID:         "auth-claude-continue-1",
-		Provider:   "claude",
+		ID:         "auth-request-continue-1",
+		Provider:   provider,
 		Status:     StatusActive,
 		Attributes: map[string]string{"priority": "10"},
 		Metadata: map[string]any{
@@ -268,13 +269,13 @@ func TestRequestScopedErrors_ActionContinue(t *testing.T) {
 		},
 	}
 	auth2 := &Auth{
-		ID:       "auth-claude-continue-2",
-		Provider: "claude",
+		ID:       "auth-request-continue-2",
+		Provider: provider,
 		Status:   StatusActive,
 	}
 	reg := registry.GetGlobalRegistry()
-	reg.RegisterClient(auth1.ID, "claude", []*registry.ModelInfo{{ID: "claude-3"}})
-	reg.RegisterClient(auth2.ID, "claude", []*registry.ModelInfo{{ID: "claude-3"}})
+	reg.RegisterClient(auth1.ID, provider, []*registry.ModelInfo{{ID: "request-scoped-model"}})
+	reg.RegisterClient(auth2.ID, provider, []*registry.ModelInfo{{ID: "request-scoped-model"}})
 	t.Cleanup(func() {
 		reg.UnregisterClient(auth1.ID)
 		reg.UnregisterClient(auth2.ID)
@@ -289,10 +290,10 @@ func TestRequestScopedErrors_ActionContinue(t *testing.T) {
 
 	execCount := 0
 	exec := &mockCustomErrorExecutor{
-		identifier: "claude",
+		identifier: provider,
 		executeFn: func(ctx context.Context, auth *Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
 			execCount++
-			if auth.ID == "auth-claude-continue-1" {
+			if auth.ID == "auth-request-continue-1" {
 				return cliproxyexecutor.Response{}, customStatusError{
 					code: 400,
 					msg:  `{"error": {"message": "try_another_key"}}`,
@@ -303,7 +304,7 @@ func TestRequestScopedErrors_ActionContinue(t *testing.T) {
 	}
 	m.RegisterExecutor(exec)
 
-	resp, errExec := m.Execute(context.Background(), []string{"claude"}, cliproxyexecutor.Request{Model: "claude-3"}, cliproxyexecutor.Options{})
+	resp, errExec := m.Execute(context.Background(), []string{provider}, cliproxyexecutor.Request{Model: "request-scoped-model"}, cliproxyexecutor.Options{})
 	if errExec != nil {
 		t.Fatalf("unexpected error: %v", errExec)
 	}
@@ -316,7 +317,7 @@ func TestRequestScopedErrors_ActionContinue(t *testing.T) {
 	}
 
 	// Verify auth1 is NOT in cooldown
-	a1, ok1 := m.GetByID("auth-claude-continue-1")
+	a1, ok1 := m.GetByID("auth-request-continue-1")
 	if !ok1 || a1.Unavailable || !a1.NextRetryAfter.IsZero() {
 		t.Fatalf("expected auth1 not to be in cooldown, got unavailable=%v, nextRetry=%v", a1.Unavailable, a1.NextRetryAfter)
 	}
@@ -328,10 +329,11 @@ func TestRequestScopedErrors_ActionContinueAndCooldown(t *testing.T) {
 	t.Cleanup(func() { quotaCooldownDisabled.Store(previous) })
 
 	m := NewManager(nil, nil, nil)
+	provider := "request-scoped-continue-cooldown"
 
 	auth1 := &Auth{
-		ID:         "auth-claude-continue-cool-1",
-		Provider:   "claude",
+		ID:         "auth-request-continue-cool-1",
+		Provider:   provider,
 		Status:     StatusActive,
 		Attributes: map[string]string{"priority": "10"},
 		Metadata: map[string]any{
@@ -347,13 +349,13 @@ func TestRequestScopedErrors_ActionContinueAndCooldown(t *testing.T) {
 		},
 	}
 	auth2 := &Auth{
-		ID:       "auth-claude-continue-cool-2",
-		Provider: "claude",
+		ID:       "auth-request-continue-cool-2",
+		Provider: provider,
 		Status:   StatusActive,
 	}
 	reg := registry.GetGlobalRegistry()
-	reg.RegisterClient(auth1.ID, "claude", []*registry.ModelInfo{{ID: "claude-3"}})
-	reg.RegisterClient(auth2.ID, "claude", []*registry.ModelInfo{{ID: "claude-3"}})
+	reg.RegisterClient(auth1.ID, provider, []*registry.ModelInfo{{ID: "request-scoped-model"}})
+	reg.RegisterClient(auth2.ID, provider, []*registry.ModelInfo{{ID: "request-scoped-model"}})
 	t.Cleanup(func() {
 		reg.UnregisterClient(auth1.ID)
 		reg.UnregisterClient(auth2.ID)
@@ -368,10 +370,10 @@ func TestRequestScopedErrors_ActionContinueAndCooldown(t *testing.T) {
 
 	execCount := 0
 	exec := &mockCustomErrorExecutor{
-		identifier: "claude",
+		identifier: provider,
 		executeFn: func(ctx context.Context, auth *Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
 			execCount++
-			if auth.ID == "auth-claude-continue-cool-1" {
+			if auth.ID == "auth-request-continue-cool-1" {
 				return cliproxyexecutor.Response{}, customStatusError{
 					code: 400,
 					msg:  `{"error": {"message": "balance_insufficient"}}`,
@@ -382,7 +384,7 @@ func TestRequestScopedErrors_ActionContinueAndCooldown(t *testing.T) {
 	}
 	m.RegisterExecutor(exec)
 
-	resp, errExec := m.Execute(context.Background(), []string{"claude"}, cliproxyexecutor.Request{Model: "claude-3"}, cliproxyexecutor.Options{})
+	resp, errExec := m.Execute(context.Background(), []string{provider}, cliproxyexecutor.Request{Model: "request-scoped-model"}, cliproxyexecutor.Options{})
 	if errExec != nil {
 		t.Fatalf("unexpected error: %v", errExec)
 	}
@@ -395,7 +397,7 @@ func TestRequestScopedErrors_ActionContinueAndCooldown(t *testing.T) {
 	}
 
 	// Verify auth1 IS in cooldown
-	a1, ok1 := m.GetByID("auth-claude-continue-cool-1")
+	a1, ok1 := m.GetByID("auth-request-continue-cool-1")
 	if !ok1 || !a1.Unavailable || a1.NextRetryAfter.IsZero() {
 		t.Fatalf("expected auth1 to be in cooldown, got unavailable=%v, nextRetry=%v", a1.Unavailable, a1.NextRetryAfter)
 	}

@@ -628,14 +628,14 @@ func TestWarnLogOnStreamBootstrapFailure(t *testing.T) {
 
 	auth := &Auth{
 		ID:         "auth-test-bootstrap-upstream",
-		Provider:   "claude",
-		FileName:   "claude-bootstrap.json",
+		Provider:   "stream-bootstrap-log",
+		FileName:   "stream-bootstrap.json",
 		Status:     StatusActive,
 		Attributes: map[string]string{"priority": "10"},
 	}
 
 	reg := registry.GetGlobalRegistry()
-	reg.RegisterClient(auth.ID, "claude", []*registry.ModelInfo{{ID: "claude-sonnet-4"}})
+	reg.RegisterClient(auth.ID, "stream-bootstrap-log", []*registry.ModelInfo{{ID: "stream-bootstrap-model"}})
 	t.Cleanup(func() {
 		reg.UnregisterClient(auth.ID)
 	})
@@ -645,7 +645,7 @@ func TestWarnLogOnStreamBootstrapFailure(t *testing.T) {
 	}
 
 	exec := &mockStreamErrorExecutor{
-		identifier: "claude",
+		identifier: "stream-bootstrap-log",
 		executeStreamFn: func(ctx context.Context, auth *Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
 			ch := make(chan cliproxyexecutor.StreamChunk, 1)
 			ch <- cliproxyexecutor.StreamChunk{Err: errors.New("504 Gateway Timeout: ttfb timeout")}
@@ -657,10 +657,10 @@ func TestWarnLogOnStreamBootstrapFailure(t *testing.T) {
 
 	hook.Reset()
 
-	req := cliproxyexecutor.Request{Model: "claude-sonnet-4"}
+	req := cliproxyexecutor.Request{Model: "stream-bootstrap-model"}
 	opts := cliproxyexecutor.Options{}
 
-	res, errStream := m.ExecuteStream(context.Background(), []string{"claude"}, req, opts)
+	res, errStream := m.ExecuteStream(context.Background(), []string{"stream-bootstrap-log"}, req, opts)
 	if errStream != nil {
 		t.Fatalf("unexpected ExecuteStream bootstrap error: %v", errStream)
 	}
@@ -675,9 +675,9 @@ func TestWarnLogOnStreamBootstrapFailure(t *testing.T) {
 	foundWarn := false
 	for _, entry := range hook.AllEntries() {
 		if entry.Level == log.WarnLevel && strings.Contains(entry.Message, "upstream execution failed") {
-			if strings.Contains(entry.Message, "provider=claude") &&
-				strings.Contains(entry.Message, "model=claude-sonnet-4") &&
-				strings.Contains(entry.Message, "claude-bootstrap.json") &&
+			if strings.Contains(entry.Message, "provider=stream-bootstrap-log") &&
+				strings.Contains(entry.Message, "model=stream-bootstrap-model") &&
+				strings.Contains(entry.Message, "stream-bootstrap.json") &&
 				strings.Contains(entry.Message, "ttfb timeout") {
 				foundWarn = true
 				break

@@ -24,6 +24,14 @@ type retryAfterProvider interface {
 	RetryAfter() *time.Duration
 }
 
+func claudeStatusCodeFromTestError(err error) int {
+	var statusErr interface{ StatusCode() int }
+	if errors.As(err, &statusErr) && statusErr != nil {
+		return statusErr.StatusCode()
+	}
+	return 0
+}
+
 func TestClaudeExecutor_HonorsAnthropicRateLimitHeaders_Execute(t *testing.T) {
 	now := time.Now()
 	sevenDayReset := now.Add(7 * 24 * time.Hour).Unix()
@@ -342,22 +350,19 @@ func TestClaudeExecutor_RateLimit_FastModeAuthoritativeRejectionHeadersOverrideB
 	}
 
 	payload := []byte(`{"speed":"fast","messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`)
-	resp, err := manager.Execute(context.Background(), []string{"claude"}, cliproxyexecutor.Request{
+	_, err := manager.Execute(context.Background(), []string{"claude"}, cliproxyexecutor.Request{
 		Model:   "claude-3-5-sonnet-20241022",
 		Payload: payload,
 	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude})
-	if err != nil {
-		t.Fatalf("expected failover to cred2 when authoritative rate limit headers present, got: %v", err)
-	}
-	if len(resp.Payload) == 0 {
-		t.Fatal("expected response from cred2")
+	if err == nil || claudeStatusCodeFromTestError(err) != http.StatusTooManyRequests {
+		t.Fatalf("expected direct upstream 429 without failover, got: %v", err)
 	}
 
 	if attemptsCred1.Load() != 1 {
 		t.Fatalf("attempts on cred1 = %d, want 1", attemptsCred1.Load())
 	}
-	if attemptsCred2.Load() != 1 {
-		t.Fatalf("attempts on cred2 = %d, want 1", attemptsCred2.Load())
+	if attemptsCred2.Load() != 0 {
+		t.Fatalf("attempts on cred2 = %d, want 0", attemptsCred2.Load())
 	}
 
 	// Verify cred1 was cooled down at credential level
@@ -668,22 +673,19 @@ func TestClaudeExecutor_AuthManager_AlternativeCredentialCanBeSelected(t *testin
 	}
 
 	payload := []byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`)
-	resp, err := manager.Execute(context.Background(), []string{"claude"}, cliproxyexecutor.Request{
+	_, err := manager.Execute(context.Background(), []string{"claude"}, cliproxyexecutor.Request{
 		Model:   "claude-3-5-sonnet-20241022",
 		Payload: payload,
 	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude})
-	if err != nil {
-		t.Fatalf("expected successful failover to cred2, got error: %v", err)
+	if err == nil || claudeStatusCodeFromTestError(err) != http.StatusTooManyRequests {
+		t.Fatalf("expected direct upstream 429 without same-request failover, got: %v", err)
 	}
 
 	if attemptsCred1.Load() != 1 {
 		t.Fatalf("attempts on cred1 = %d, want 1", attemptsCred1.Load())
 	}
-	if attemptsCred2.Load() != 1 {
-		t.Fatalf("attempts on cred2 = %d, want 1", attemptsCred2.Load())
-	}
-	if len(resp.Payload) == 0 {
-		t.Fatal("expected non-empty response payload from cred2")
+	if attemptsCred2.Load() != 0 {
+		t.Fatalf("attempts on cred2 = %d, want 0", attemptsCred2.Load())
 	}
 
 	// Next request should directly use cred2 without attempting cred1 (which is cooling down)
@@ -697,8 +699,8 @@ func TestClaudeExecutor_AuthManager_AlternativeCredentialCanBeSelected(t *testin
 	if attemptsCred1.Load() != 1 {
 		t.Fatalf("attempts on cred1 after 2nd request = %d, want 1 (must stay 1)", attemptsCred1.Load())
 	}
-	if attemptsCred2.Load() != 2 {
-		t.Fatalf("attempts on cred2 after 2nd request = %d, want 2", attemptsCred2.Load())
+	if attemptsCred2.Load() != 1 {
+		t.Fatalf("attempts on cred2 after 2nd request = %d, want 1", attemptsCred2.Load())
 	}
 	if len(resp2.Payload) == 0 {
 		t.Fatal("expected non-empty response payload from 2nd request")
@@ -775,20 +777,18 @@ func TestClaudeExecutor_AuthManager_MultiModelPoolStreamStopsProbingOn429(t *tes
 		Model:   "claude-pool-alias",
 		Payload: payload,
 	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude})
-	if err != nil {
-		t.Fatalf("ExecuteStream failed: %v", err)
+	if err == nil || claudeStatusCodeFromTestError(err) != http.StatusTooManyRequests {
+		t.Fatalf("ExecuteStream error = %v, want direct upstream 429", err)
 	}
-	for chunk := range res.Chunks {
-		if chunk.Err != nil {
-			t.Fatalf("unexpected chunk error: %v", chunk.Err)
-		}
+	if res != nil {
+		t.Fatalf("ExecuteStream result = %#v, want nil on direct upstream error", res)
 	}
 
-	// Must have tried cred1 exactly once (did NOT probe the 2nd model on cred1 after 429) and failed over to cred2
+	// Must have tried cred1 exactly once and returned the upstream error without probing other models or credentials.
 	if got := attemptsCred1.Load(); got != 1 {
 		t.Fatalf("attempts on cred1 = %d, want 1 (must not probe other models on cooled cred)", got)
 	}
-	if got := attemptsCred2.Load(); got != 1 {
-		t.Fatalf("attempts on cred2 = %d, want 1", got)
+	if got := attemptsCred2.Load(); got != 0 {
+		t.Fatalf("attempts on cred2 = %d, want 0", got)
 	}
 }

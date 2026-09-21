@@ -68,3 +68,64 @@ func shouldStopAfterCandidateExhaustion(err error) bool {
 	status := statusCodeFromError(err)
 	return status == http.StatusTooManyRequests
 }
+
+// directUpstreamReturnError marks an upstream provider error that must be
+// returned to the caller without same-auth retry, credential failover, or an
+// outer request retry round.
+type directUpstreamReturnError struct {
+	cause error
+}
+
+func (e *directUpstreamReturnError) Error() string {
+	if e == nil || e.cause == nil {
+		return ""
+	}
+	return e.cause.Error()
+}
+
+func (e *directUpstreamReturnError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.cause
+}
+
+func markDirectUpstreamReturnError(err error) error {
+	if err == nil || isDirectUpstreamReturnError(err) {
+		return err
+	}
+	return &directUpstreamReturnError{cause: err}
+}
+
+func unwrapDirectUpstreamReturnError(err error) error {
+	if marker, ok := asDirectUpstreamReturnError(err); ok && marker.cause != nil {
+		return marker.cause
+	}
+	return err
+}
+
+func isDirectUpstreamReturnError(err error) bool {
+	_, ok := asDirectUpstreamReturnError(err)
+	return ok
+}
+
+func asDirectUpstreamReturnError(err error) (*directUpstreamReturnError, bool) {
+	if err == nil {
+		return nil, false
+	}
+	current := err
+	for current != nil {
+		if marker, ok := current.(*directUpstreamReturnError); ok {
+			return marker, true
+		}
+		type unwrapper interface {
+			Unwrap() error
+		}
+		wrapped, ok := current.(unwrapper)
+		if !ok {
+			break
+		}
+		current = wrapped.Unwrap()
+	}
+	return nil, false
+}

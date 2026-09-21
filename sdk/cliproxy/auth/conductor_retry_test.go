@@ -182,11 +182,11 @@ func TestRetrySameAuthCancellationInterruptsBackoff(t *testing.T) {
 func TestExecuteRetriesSameAuthBeforeCooldownAndSwitch(t *testing.T) {
 	waits := withTransientRetryTestBackoff(t)
 	hook := &resultCaptureHook{}
-	executor := &transientRetryTestExecutor{id: "claude", executeFailures: 2}
+	executor := &transientRetryTestExecutor{id: "retry-provider", executeFailures: 2}
 	m := newTransientRetryTestManager(t, executor, hook)
 	m.SetTransientRetryCount(2)
 
-	resp, errExecute := m.Execute(context.Background(), []string{"claude"}, cliproxyexecutor.Request{Model: "retry-model"}, cliproxyexecutor.Options{})
+	resp, errExecute := m.Execute(context.Background(), []string{executor.id}, cliproxyexecutor.Request{Model: "retry-model"}, cliproxyexecutor.Options{})
 	if errExecute != nil {
 		t.Fatalf("execute error = %v", errExecute)
 	}
@@ -207,11 +207,11 @@ func TestExecuteRetriesSameAuthBeforeCooldownAndSwitch(t *testing.T) {
 
 func TestExecuteTransientRetryCountZeroSwitchesAuthImmediately(t *testing.T) {
 	withTransientRetryTestBackoff(t)
-	executor := &transientRetryTestExecutor{id: "claude", failAuthID: "aa-auth"}
+	executor := &transientRetryTestExecutor{id: "retry-provider", failAuthID: "aa-auth"}
 	m := newTransientRetryTestManager(t, executor, nil)
 	m.SetTransientRetryCount(0)
 
-	resp, errExecute := m.Execute(context.Background(), []string{"claude"}, cliproxyexecutor.Request{Model: "retry-model"}, cliproxyexecutor.Options{})
+	resp, errExecute := m.Execute(context.Background(), []string{executor.id}, cliproxyexecutor.Request{Model: "retry-model"}, cliproxyexecutor.Options{})
 	if errExecute != nil {
 		t.Fatalf("execute error = %v", errExecute)
 	}
@@ -223,13 +223,57 @@ func TestExecuteTransientRetryCountZeroSwitchesAuthImmediately(t *testing.T) {
 	}
 }
 
+func TestClaudeExecuteReturnsUpstreamErrorWithoutRetry(t *testing.T) {
+	waits := withTransientRetryTestBackoff(t)
+	executor := &transientRetryTestExecutor{id: "claude", failAuthID: "aa-auth", transientStatus: http.StatusBadGateway}
+	m := newTransientRetryTestManager(t, executor, nil)
+	m.SetTransientRetryCount(2)
+	m.SetRetryConfig(3, 0, 0)
+
+	_, errExecute := m.Execute(context.Background(), []string{"claude"}, cliproxyexecutor.Request{Model: "retry-model"}, cliproxyexecutor.Options{})
+	if errExecute == nil {
+		t.Fatal("execute error = nil, want upstream error")
+	}
+	if got := statusCodeFromError(errExecute); got != http.StatusBadGateway {
+		t.Fatalf("execute status = %d, want %d; err=%v", got, http.StatusBadGateway, errExecute)
+	}
+	if got, want := executor.ExecuteCalls(), []string{"aa-auth"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("execute calls = %v, want %v", got, want)
+	}
+	if len(*waits) != 0 {
+		t.Fatalf("retry waits = %v, want none", *waits)
+	}
+}
+
+func TestClaudeExecuteCountReturnsUpstreamErrorWithoutRetry(t *testing.T) {
+	waits := withTransientRetryTestBackoff(t)
+	executor := &transientRetryTestExecutor{id: "claude", countFailures: 1, transientStatus: http.StatusBadGateway}
+	m := newTransientRetryTestManager(t, executor, nil)
+	m.SetTransientRetryCount(2)
+	m.SetRetryConfig(3, 0, 0)
+
+	_, errExecute := m.ExecuteCount(context.Background(), []string{"claude"}, cliproxyexecutor.Request{Model: "retry-model"}, cliproxyexecutor.Options{})
+	if errExecute == nil {
+		t.Fatal("execute count error = nil, want upstream error")
+	}
+	if got := statusCodeFromError(errExecute); got != http.StatusBadGateway {
+		t.Fatalf("execute count status = %d, want %d; err=%v", got, http.StatusBadGateway, errExecute)
+	}
+	if got, want := executor.CountCalls(), []string{"aa-auth"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("count calls = %v, want %v", got, want)
+	}
+	if len(*waits) != 0 {
+		t.Fatalf("retry waits = %v, want none", *waits)
+	}
+}
+
 func TestExecuteCountRetriesSameAuth(t *testing.T) {
 	withTransientRetryTestBackoff(t)
-	executor := &transientRetryTestExecutor{id: "claude", countFailures: 1}
+	executor := &transientRetryTestExecutor{id: "retry-provider", countFailures: 1}
 	m := newTransientRetryTestManager(t, executor, nil)
 	m.SetTransientRetryCount(1)
 
-	resp, errExecute := m.ExecuteCount(context.Background(), []string{"claude"}, cliproxyexecutor.Request{Model: "retry-model"}, cliproxyexecutor.Options{})
+	resp, errExecute := m.ExecuteCount(context.Background(), []string{executor.id}, cliproxyexecutor.Request{Model: "retry-model"}, cliproxyexecutor.Options{})
 	if errExecute != nil {
 		t.Fatalf("execute count error = %v", errExecute)
 	}
@@ -244,11 +288,11 @@ func TestExecuteCountRetriesSameAuth(t *testing.T) {
 func TestExecuteStreamRetriesBootstrapOnlyBeforeFirstPayload(t *testing.T) {
 	withTransientRetryTestBackoff(t)
 	hook := &resultCaptureHook{}
-	executor := &transientRetryTestExecutor{id: "claude", streamBootstrapFails: 1}
+	executor := &transientRetryTestExecutor{id: "retry-provider", streamBootstrapFails: 1}
 	m := newTransientRetryTestManager(t, executor, hook)
 	m.SetTransientRetryCount(1)
 
-	streamResult, errExecute := m.ExecuteStream(context.Background(), []string{"claude"}, cliproxyexecutor.Request{Model: "retry-model"}, cliproxyexecutor.Options{})
+	streamResult, errExecute := m.ExecuteStream(context.Background(), []string{executor.id}, cliproxyexecutor.Request{Model: "retry-model"}, cliproxyexecutor.Options{})
 	if errExecute != nil {
 		t.Fatalf("execute stream error = %v", errExecute)
 	}
@@ -271,13 +315,38 @@ func TestExecuteStreamRetriesBootstrapOnlyBeforeFirstPayload(t *testing.T) {
 	}
 }
 
+func TestClaudeExecuteStreamReturnsBootstrapErrorWithoutRetry(t *testing.T) {
+	waits := withTransientRetryTestBackoff(t)
+	executor := &transientRetryTestExecutor{id: "claude", streamBootstrapFails: 1, transientStatus: http.StatusBadGateway}
+	m := newTransientRetryTestManager(t, executor, nil)
+	m.SetTransientRetryCount(2)
+	m.SetRetryConfig(3, 0, 0)
+
+	streamResult, errExecute := m.ExecuteStream(context.Background(), []string{"claude"}, cliproxyexecutor.Request{Model: "retry-model"}, cliproxyexecutor.Options{})
+	if errExecute == nil {
+		t.Fatal("execute stream error = nil, want direct upstream error")
+	}
+	if streamResult != nil {
+		t.Fatalf("stream result = %#v, want nil", streamResult)
+	}
+	if got := statusCodeFromError(errExecute); got != http.StatusBadGateway {
+		t.Fatalf("stream status = %d, want %d; err=%v", got, http.StatusBadGateway, errExecute)
+	}
+	if got, want := executor.StreamCalls(), []string{"aa-auth"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("stream calls = %v, want %v", got, want)
+	}
+	if len(*waits) != 0 {
+		t.Fatalf("retry waits = %v, want none", *waits)
+	}
+}
+
 func TestExecuteStreamDoesNotRetryAfterFirstPayload(t *testing.T) {
 	withTransientRetryTestBackoff(t)
-	executor := &transientRetryTestExecutor{id: "claude", streamPostBootstrap: true}
+	executor := &transientRetryTestExecutor{id: "retry-provider", streamPostBootstrap: true}
 	m := newTransientRetryTestManager(t, executor, nil)
 	m.SetTransientRetryCount(3)
 
-	streamResult, errExecute := m.ExecuteStream(context.Background(), []string{"claude"}, cliproxyexecutor.Request{Model: "retry-model"}, cliproxyexecutor.Options{})
+	streamResult, errExecute := m.ExecuteStream(context.Background(), []string{executor.id}, cliproxyexecutor.Request{Model: "retry-model"}, cliproxyexecutor.Options{})
 	if errExecute != nil {
 		t.Fatalf("execute stream error = %v", errExecute)
 	}
