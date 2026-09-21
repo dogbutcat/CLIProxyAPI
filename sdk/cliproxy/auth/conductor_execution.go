@@ -41,6 +41,10 @@ func claudeOAuthRequestCancellation(ctx context.Context, auth *Auth, err error) 
 	return nil
 }
 
+func providerReturnsUpstreamErrorsDirectly(provider string) bool {
+	return strings.EqualFold(strings.TrimSpace(provider), "claude")
+}
+
 type upstreamExecutionAttemptError struct {
 	cause error
 }
@@ -91,6 +95,7 @@ func unwrapUpstreamExecutionAttempt(err error) error {
 
 func unwrapExecutionBoundaryError(err error) error {
 	err = unwrapRequestStopError(err)
+	err = unwrapDirectUpstreamReturnError(err)
 	return unwrapUpstreamExecutionAttempt(err)
 }
 
@@ -301,7 +306,11 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 		if preferredUpstreamErr != nil && (!m.HomeEnabled() || isHomeRetryRoundExhausted(lastErr)) {
 			lastErr = preferredExecutionAttemptError(lastErr, preferredUpstreamErr)
 		}
+		directReturn := isDirectUpstreamReturnError(lastErr)
 		lastErr = unwrapCandidateExhaustedUpstreamError(unwrapExecutionBoundaryError(lastErr))
+		if directReturn {
+			return nil, lastErr
+		}
 		if hasAntigravityProvider(normalized) && shouldAttemptAntigravityCreditsFallback(m, lastErr, normalized) {
 			if result, ok, errCredits := m.tryAntigravityCreditsExecuteStream(ctx, req, opts); errCredits != nil {
 				return nil, errCredits
@@ -599,21 +608,23 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 						return cliproxyexecutor.Response{}, errCtx
 					}
 					refreshCtx := newUpstreamAttemptContext(execCtx)
-					if refreshed, okRefresh := m.tryRefreshAfterUnauthorized(refreshCtx, auth, errExec, didRefreshOnUnauthorized); okRefresh {
-						auth = refreshed
-						didRefreshOnUnauthorized = true
-						execCtx = newUpstreamAttemptContext(execCtx)
-						execCtx = syncMetadataSessionToContext(execCtx, execOpts.Metadata)
-						startRetry := time.Now()
-						resp, errExec = executor.Execute(execCtx, auth, execReq, execOpts)
-						errExec = markUpstreamExecutionAttemptFromContext(execCtx, errExec)
-						durationExec = time.Since(startRetry)
-						if errExec != nil {
-							if hasUpstreamExecutionAttempt(errExec) {
-								upstreamErr = errExec
-							}
-							if errCtx := execCtx.Err(); errCtx != nil {
-								return cliproxyexecutor.Response{}, errCtx
+					if !providerReturnsUpstreamErrorsDirectly(provider) {
+						if refreshed, okRefresh := m.tryRefreshAfterUnauthorized(refreshCtx, auth, errExec, didRefreshOnUnauthorized); okRefresh {
+							auth = refreshed
+							didRefreshOnUnauthorized = true
+							execCtx = newUpstreamAttemptContext(execCtx)
+							execCtx = syncMetadataSessionToContext(execCtx, execOpts.Metadata)
+							startRetry := time.Now()
+							resp, errExec = executor.Execute(execCtx, auth, execReq, execOpts)
+							errExec = markUpstreamExecutionAttemptFromContext(execCtx, errExec)
+							durationExec = time.Since(startRetry)
+							if errExec != nil {
+								if hasUpstreamExecutionAttempt(errExec) {
+									upstreamErr = errExec
+								}
+								if errCtx := execCtx.Err(); errCtx != nil {
+									return cliproxyexecutor.Response{}, errCtx
+								}
 							}
 						}
 					}
@@ -621,13 +632,16 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 						warnLogUpstreamFailure(execCtx, entry, provider, upstreamModel, auth, durationExec, errExec)
 					}
 				}
-				shouldRetry, errRetry := m.retrySameAuth(execCtx, auth, errExec, sameAuthAttempt)
-				if errRetry != nil {
-					return cliproxyexecutor.Response{}, errRetry
+				if !providerReturnsUpstreamErrorsDirectly(provider) {
+					shouldRetry, errRetry := m.retrySameAuth(execCtx, auth, errExec, sameAuthAttempt)
+					if errRetry != nil {
+						return cliproxyexecutor.Response{}, errRetry
+					}
+					if shouldRetry {
+						continue
+					}
 				}
-				if !shouldRetry {
-					break
-				}
+				break
 			}
 			if errCancel := claudeOAuthRequestCancellation(execCtx, auth, errExec); errCancel != nil {
 				return cliproxyexecutor.Response{}, errCancel
@@ -647,6 +661,9 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 					m.recordAvailabilityNeutralResult(execCtx, result)
 				} else {
 					m.MarkResult(execCtx, result)
+				}
+				if providerReturnsUpstreamErrorsDirectly(provider) {
+					return cliproxyexecutor.Response{}, markDirectUpstreamReturnError(errExec)
 				}
 				if okAction {
 					if isRequestScopedStop(action, okAction) {
@@ -825,21 +842,23 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 						return cliproxyexecutor.Response{}, errCtx
 					}
 					refreshCtx := newUpstreamAttemptContext(execCtx)
-					if refreshed, okRefresh := m.tryRefreshAfterUnauthorized(refreshCtx, auth, errExec, didRefreshOnUnauthorized); okRefresh {
-						auth = refreshed
-						didRefreshOnUnauthorized = true
-						execCtx = newUpstreamAttemptContext(execCtx)
-						execCtx = syncMetadataSessionToContext(execCtx, execOpts.Metadata)
-						startRetry := time.Now()
-						resp, errExec = executor.CountTokens(execCtx, auth, execReq, execOpts)
-						errExec = markUpstreamExecutionAttemptFromContext(execCtx, errExec)
-						durationExec = time.Since(startRetry)
-						if errExec != nil {
-							if hasUpstreamExecutionAttempt(errExec) {
-								upstreamErr = errExec
-							}
-							if errCtx := execCtx.Err(); errCtx != nil {
-								return cliproxyexecutor.Response{}, errCtx
+					if !providerReturnsUpstreamErrorsDirectly(provider) {
+						if refreshed, okRefresh := m.tryRefreshAfterUnauthorized(refreshCtx, auth, errExec, didRefreshOnUnauthorized); okRefresh {
+							auth = refreshed
+							didRefreshOnUnauthorized = true
+							execCtx = newUpstreamAttemptContext(execCtx)
+							execCtx = syncMetadataSessionToContext(execCtx, execOpts.Metadata)
+							startRetry := time.Now()
+							resp, errExec = executor.CountTokens(execCtx, auth, execReq, execOpts)
+							errExec = markUpstreamExecutionAttemptFromContext(execCtx, errExec)
+							durationExec = time.Since(startRetry)
+							if errExec != nil {
+								if hasUpstreamExecutionAttempt(errExec) {
+									upstreamErr = errExec
+								}
+								if errCtx := execCtx.Err(); errCtx != nil {
+									return cliproxyexecutor.Response{}, errCtx
+								}
 							}
 						}
 					}
@@ -847,13 +866,16 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 						warnLogUpstreamFailure(execCtx, entry, provider, upstreamModel, auth, durationExec, errExec)
 					}
 				}
-				shouldRetry, errRetry := m.retrySameAuth(execCtx, auth, errExec, sameAuthAttempt)
-				if errRetry != nil {
-					return cliproxyexecutor.Response{}, errRetry
+				if !providerReturnsUpstreamErrorsDirectly(provider) {
+					shouldRetry, errRetry := m.retrySameAuth(execCtx, auth, errExec, sameAuthAttempt)
+					if errRetry != nil {
+						return cliproxyexecutor.Response{}, errRetry
+					}
+					if shouldRetry {
+						continue
+					}
 				}
-				if !shouldRetry {
-					break
-				}
+				break
 			}
 			if errCancel := claudeOAuthRequestCancellation(execCtx, auth, errExec); errCancel != nil {
 				return cliproxyexecutor.Response{}, errCancel
@@ -877,6 +899,9 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 						result.CredentialScope = true
 					}
 					m.MarkResult(execCtx, result)
+				}
+				if providerReturnsUpstreamErrorsDirectly(provider) {
+					return cliproxyexecutor.Response{}, markDirectUpstreamReturnError(errExec)
 				}
 				if okAction {
 					if isRequestScopedStop(action, okAction) {
@@ -1214,6 +1239,9 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			}
 			if errCtx := execCtx.Err(); errCtx != nil && ctx != nil && ctx.Err() != nil {
 				return nil, errCtx
+			}
+			if isDirectUpstreamReturnError(errStream) {
+				return nil, errStream
 			}
 			action, okAction := matchRequestScopedErrorAction(auth, errStream, m.runtimeConfigSnapshot())
 			if okAction {

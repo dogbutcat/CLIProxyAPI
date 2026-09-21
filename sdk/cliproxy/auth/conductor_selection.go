@@ -1361,6 +1361,9 @@ func (m *Manager) shouldRetryAfterErrorWithAttempted(ctx context.Context, opts c
 	if isRequestInvalidError(err) || isRequestStopError(err) {
 		return 0, false
 	}
+	if isDirectUpstreamReturnError(err) {
+		return 0, false
+	}
 	if isCandidateExhaustedUpstreamError(err) {
 		return 0, false
 	}

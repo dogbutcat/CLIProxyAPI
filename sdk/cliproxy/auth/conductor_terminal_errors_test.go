@@ -94,8 +94,8 @@ func TestCandidateExhaustedAll429StopsAfterOneCredentialSweep(t *testing.T) {
 	if got := statusCodeFromError(errExecute); got != http.StatusTooManyRequests {
 		t.Fatalf("Execute() status = %d, want 429; err=%v", got, errExecute)
 	}
-	if calls := executor.ExecuteCalls(); len(calls) != len(authIDs) {
-		t.Fatalf("executor calls = %v, want one sweep across %d auths", calls, len(authIDs))
+	if calls := executor.ExecuteCalls(); len(calls) != 1 || calls[0] != authIDs[0] {
+		t.Fatalf("executor calls = %v, want direct return after first auth %s", calls, authIDs[0])
 	}
 }
 
@@ -165,26 +165,17 @@ func TestCandidateExhaustedStream429ReturnsBootstrapErrorWithoutRepeat(t *testin
 	manager.RegisterExecutor(executor)
 
 	result, errStream := manager.ExecuteStream(context.Background(), []string{"claude"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{Stream: true})
-	if errStream != nil {
-		t.Fatalf("ExecuteStream() returned immediate error = %v, want stream bootstrap result", errStream)
+	if errStream == nil {
+		t.Fatal("ExecuteStream() error = nil, want direct upstream 429")
 	}
-	if result == nil || result.Chunks == nil {
-		t.Fatal("ExecuteStream() result is nil")
+	if result != nil {
+		t.Fatalf("ExecuteStream() result = %#v, want nil", result)
 	}
-	var chunkErr error
-	for chunk := range result.Chunks {
-		if chunk.Err != nil {
-			chunkErr = chunk.Err
-		}
+	if got := statusCodeFromError(errStream); got != http.StatusTooManyRequests {
+		t.Fatalf("stream status = %d, want 429; err=%v", got, errStream)
 	}
-	if chunkErr == nil {
-		t.Fatal("stream chunk error = nil, want upstream 429")
-	}
-	if got := statusCodeFromError(chunkErr); got != http.StatusTooManyRequests {
-		t.Fatalf("stream chunk status = %d, want 429; err=%v", got, chunkErr)
-	}
-	if calls := executor.StreamCalls(); len(calls) != len(authIDs) {
-		t.Fatalf("stream calls = %v, want one sweep across %d auths", calls, len(authIDs))
+	if calls := executor.StreamCalls(); len(calls) != 1 || calls[0] != authIDs[0] {
+		t.Fatalf("stream calls = %v, want direct return after first auth %s", calls, authIDs[0])
 	}
 }
 

@@ -291,21 +291,21 @@ func TestManager_RequestRetryRunsAdditionalLocalRoundWithoutCooldown(t *testing.
 		{
 			name: "nonstream",
 			execute: func(m *Manager, req cliproxyexecutor.Request) error {
-				_, errExecute := m.Execute(context.Background(), []string{"claude"}, req, cliproxyexecutor.Options{})
+				_, errExecute := m.Execute(context.Background(), []string{"retry-provider"}, req, cliproxyexecutor.Options{})
 				return errExecute
 			},
 		},
 		{
 			name: "count tokens",
 			execute: func(m *Manager, req cliproxyexecutor.Request) error {
-				_, errExecute := m.ExecuteCount(context.Background(), []string{"claude"}, req, cliproxyexecutor.Options{})
+				_, errExecute := m.ExecuteCount(context.Background(), []string{"retry-provider"}, req, cliproxyexecutor.Options{})
 				return errExecute
 			},
 		},
 		{
 			name: "stream",
 			execute: func(m *Manager, req cliproxyexecutor.Request) error {
-				_, errExecute := m.ExecuteStream(context.Background(), []string{"claude"}, req, cliproxyexecutor.Options{Stream: true})
+				_, errExecute := m.ExecuteStream(context.Background(), []string{"retry-provider"}, req, cliproxyexecutor.Options{Stream: true})
 				return errExecute
 			},
 		},
@@ -314,12 +314,12 @@ func TestManager_RequestRetryRunsAdditionalLocalRoundWithoutCooldown(t *testing.
 		t.Run(tc.name, func(t *testing.T) {
 			m := NewManager(nil, nil, nil)
 			m.SetRetryConfig(1, 0, 0)
-			executor := &credentialRetryLimitExecutor{id: "claude"}
+			executor := &credentialRetryLimitExecutor{id: "retry-provider"}
 			m.RegisterExecutor(executor)
 			authID := uuid.NewString()
 			model := "retry-model-" + authID
-			auth := &Auth{ID: authID, Provider: "claude", Metadata: map[string]any{"disable_cooling": true}}
-			registry.GetGlobalRegistry().RegisterClient(authID, "claude", []*registry.ModelInfo{{ID: model}})
+			auth := &Auth{ID: authID, Provider: "retry-provider", Metadata: map[string]any{"disable_cooling": true}}
+			registry.GetGlobalRegistry().RegisterClient(authID, "retry-provider", []*registry.ModelInfo{{ID: model}})
 			t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(authID) })
 			if _, errRegister := m.Register(context.Background(), auth); errRegister != nil {
 				t.Fatalf("register auth: %v", errRegister)
@@ -586,17 +586,17 @@ func newCredentialRetryLimitTestManager(t *testing.T, maxRetryCredentials int) (
 	m := NewManager(nil, nil, nil)
 	m.SetRetryConfig(0, 0, maxRetryCredentials)
 
-	executor := &credentialRetryLimitExecutor{id: "claude"}
+	executor := &credentialRetryLimitExecutor{id: "retry-limit-provider"}
 	m.RegisterExecutor(executor)
 
 	baseID := uuid.NewString()
-	auth1 := &Auth{ID: baseID + "-auth-1", Provider: "claude"}
-	auth2 := &Auth{ID: baseID + "-auth-2", Provider: "claude"}
+	auth1 := &Auth{ID: baseID + "-auth-1", Provider: "retry-limit-provider"}
+	auth2 := &Auth{ID: baseID + "-auth-2", Provider: "retry-limit-provider"}
 
 	// Auth selection requires that the global model registry knows each credential supports the model.
 	reg := registry.GetGlobalRegistry()
-	reg.RegisterClient(auth1.ID, "claude", []*registry.ModelInfo{{ID: "test-model"}})
-	reg.RegisterClient(auth2.ID, "claude", []*registry.ModelInfo{{ID: "test-model"}})
+	reg.RegisterClient(auth1.ID, "retry-limit-provider", []*registry.ModelInfo{{ID: "test-model"}})
+	reg.RegisterClient(auth2.ID, "retry-limit-provider", []*registry.ModelInfo{{ID: "test-model"}})
 	t.Cleanup(func() {
 		reg.UnregisterClient(auth1.ID)
 		reg.UnregisterClient(auth2.ID)
@@ -621,21 +621,21 @@ func TestManager_MaxRetryCredentials_LimitsCrossCredentialRetries(t *testing.T) 
 		{
 			name: "execute",
 			invoke: func(m *Manager) error {
-				_, errExecute := m.Execute(context.Background(), []string{"claude"}, request, cliproxyexecutor.Options{})
+				_, errExecute := m.Execute(context.Background(), []string{"retry-limit-provider"}, request, cliproxyexecutor.Options{})
 				return errExecute
 			},
 		},
 		{
 			name: "execute_count",
 			invoke: func(m *Manager) error {
-				_, errExecute := m.ExecuteCount(context.Background(), []string{"claude"}, request, cliproxyexecutor.Options{})
+				_, errExecute := m.ExecuteCount(context.Background(), []string{"retry-limit-provider"}, request, cliproxyexecutor.Options{})
 				return errExecute
 			},
 		},
 		{
 			name: "execute_stream",
 			invoke: func(m *Manager) error {
-				_, errExecute := m.ExecuteStream(context.Background(), []string{"claude"}, request, cliproxyexecutor.Options{})
+				_, errExecute := m.ExecuteStream(context.Background(), []string{"retry-limit-provider"}, request, cliproxyexecutor.Options{})
 				return errExecute
 			},
 		},
@@ -665,8 +665,9 @@ func TestManager_MaxRetryCredentials_LimitsCrossCredentialRetries(t *testing.T) 
 
 func TestManager_ModelSupportBadRequest_FallsBackAndSuspendsAuth(t *testing.T) {
 	m := NewManager(nil, nil, nil)
+	provider := "model-support-fallback"
 	executor := &authFallbackExecutor{
-		id: "claude",
+		id: provider,
 		executeErrors: map[string]error{
 			"aa-bad-auth": &Error{
 				HTTPStatus: http.StatusBadRequest,
@@ -676,13 +677,13 @@ func TestManager_ModelSupportBadRequest_FallsBackAndSuspendsAuth(t *testing.T) {
 	}
 	m.RegisterExecutor(executor)
 
-	model := "claude-opus-4-6"
-	badAuth := &Auth{ID: "aa-bad-auth", Provider: "claude"}
-	goodAuth := &Auth{ID: "bb-good-auth", Provider: "claude"}
+	model := "model-support-target"
+	badAuth := &Auth{ID: "aa-bad-auth", Provider: provider}
+	goodAuth := &Auth{ID: "bb-good-auth", Provider: provider}
 
 	reg := registry.GetGlobalRegistry()
-	reg.RegisterClient(badAuth.ID, "claude", []*registry.ModelInfo{{ID: model}})
-	reg.RegisterClient(goodAuth.ID, "claude", []*registry.ModelInfo{{ID: model}})
+	reg.RegisterClient(badAuth.ID, provider, []*registry.ModelInfo{{ID: model}})
+	reg.RegisterClient(goodAuth.ID, provider, []*registry.ModelInfo{{ID: model}})
 	t.Cleanup(func() {
 		reg.UnregisterClient(badAuth.ID)
 		reg.UnregisterClient(goodAuth.ID)
@@ -697,7 +698,7 @@ func TestManager_ModelSupportBadRequest_FallsBackAndSuspendsAuth(t *testing.T) {
 
 	request := cliproxyexecutor.Request{Model: model}
 	for i := 0; i < 2; i++ {
-		resp, errExecute := m.Execute(context.Background(), []string{"claude"}, request, cliproxyexecutor.Options{})
+		resp, errExecute := m.Execute(context.Background(), []string{provider}, request, cliproxyexecutor.Options{})
 		if errExecute != nil {
 			t.Fatalf("execute %d error = %v, want success", i, errExecute)
 		}
@@ -887,8 +888,9 @@ func TestManagerExecuteStream_AntigravityInvalidGrantFallsBackAndSuspendsAuth(t 
 
 func TestManagerExecuteStream_ModelSupportBadRequestFallsBackAndSuspendsAuth(t *testing.T) {
 	m := NewManager(nil, nil, nil)
+	provider := "model-support-stream-fallback"
 	executor := &authFallbackExecutor{
-		id: "claude",
+		id: provider,
 		streamFirstErrors: map[string]error{
 			"aa-bad-auth": &Error{
 				HTTPStatus: http.StatusBadRequest,
@@ -898,13 +900,13 @@ func TestManagerExecuteStream_ModelSupportBadRequestFallsBackAndSuspendsAuth(t *
 	}
 	m.RegisterExecutor(executor)
 
-	model := "claude-opus-4-6"
-	badAuth := &Auth{ID: "aa-bad-auth", Provider: "claude"}
-	goodAuth := &Auth{ID: "bb-good-auth", Provider: "claude"}
+	model := "model-support-stream-target"
+	badAuth := &Auth{ID: "aa-bad-auth", Provider: provider}
+	goodAuth := &Auth{ID: "bb-good-auth", Provider: provider}
 
 	reg := registry.GetGlobalRegistry()
-	reg.RegisterClient(badAuth.ID, "claude", []*registry.ModelInfo{{ID: model}})
-	reg.RegisterClient(goodAuth.ID, "claude", []*registry.ModelInfo{{ID: model}})
+	reg.RegisterClient(badAuth.ID, provider, []*registry.ModelInfo{{ID: model}})
+	reg.RegisterClient(goodAuth.ID, provider, []*registry.ModelInfo{{ID: model}})
 	t.Cleanup(func() {
 		reg.UnregisterClient(badAuth.ID)
 		reg.UnregisterClient(goodAuth.ID)
@@ -919,7 +921,7 @@ func TestManagerExecuteStream_ModelSupportBadRequestFallsBackAndSuspendsAuth(t *
 
 	request := cliproxyexecutor.Request{Model: model}
 	for i := 0; i < 2; i++ {
-		streamResult, errExecute := m.ExecuteStream(context.Background(), []string{"claude"}, request, cliproxyexecutor.Options{})
+		streamResult, errExecute := m.ExecuteStream(context.Background(), []string{provider}, request, cliproxyexecutor.Options{})
 		if errExecute != nil {
 			t.Fatalf("execute stream %d error = %v, want success", i, errExecute)
 		}

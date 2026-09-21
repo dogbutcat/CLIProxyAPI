@@ -78,5 +78,14 @@ quota-hub	preserve	sdk/cliproxy/auth/types.go
 quota-hub	preserve	sdk/cliproxy/service_lifecycle.go
 terminal-error-stop	preserve	sdk/api/handlers/claude/code_handlers.go
 terminal-error-stop	preserve	sdk/api/handlers/claude/code_handlers_error_test.go
+terminal-error-stop	preserve	sdk/cliproxy/auth/conductor_execution.go
+terminal-error-stop	preserve	sdk/cliproxy/auth/conductor_stream.go
+terminal-error-stop	preserve	sdk/cliproxy/auth/conductor_selection.go
 terminal-error-stop	preserve	sdk/cliproxy/auth/conductor_terminal_errors.go
 terminal-error-stop	preserve	sdk/cliproxy/auth/conductor_terminal_errors_test.go
+terminal-error-stop	preserve	sdk/cliproxy/auth/conductor_retry_test.go
+terminal-error-stop	preserve	sdk/cliproxy/auth/conductor_claude_cancellation_test.go
+terminal-error-stop	preserve	sdk/cliproxy/auth/conductor_overrides_test.go
+terminal-error-stop	preserve	sdk/cliproxy/auth/conductor_request_scoped_errors_test.go
+terminal-error-stop	preserve	sdk/cliproxy/auth/conductor_warn_logging_test.go
+terminal-error-stop	preserve	internal/runtime/executor/claude_executor_ratelimit_test.go
