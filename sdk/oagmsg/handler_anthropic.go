@@ -527,6 +527,16 @@ func (h *AnthropicHandler) serializeOneMessageForRequest(req *UnifiedRequest, ms
 				contentBlocks = append(contentBlocks, cb)
 			}
 
+		case VideoBlock:
+			cb := map[string]any{
+				"type":      "video_url",
+				"video_url": openAIVideoURLObject(block),
+			}
+			if block.CacheControl != nil {
+				cb["cache_control"] = block.CacheControl
+			}
+			contentBlocks = append(contentBlocks, cb)
+
 		case ThinkingBlock:
 			block, keep := requestThinkingForTarget(req, FormatAnthropic, msg.Role, block, signature.SignatureBlockKindClaudeThinking)
 			if !keep {

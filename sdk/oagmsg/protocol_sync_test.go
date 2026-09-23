@@ -800,13 +800,14 @@ func TestContentBlockInterfaceExtended(t *testing.T) {
 		TextBlock{Text: "hello"},
 		ImageBlock{MediaType: "image/png", Data: "data"},
 		FileBlock{Filename: "f.pdf"},
+		VideoBlock{MediaType: "video/mp4", Data: "data"},
 		ToolUseBlock{ID: "1", Name: "test"},
 		ToolResultBlock{ToolUseID: "1"},
 		ThinkingBlock{Thinking: "think"},
 		AudioBlock{Data: "audio", Format: "wav"},
 		RawBlock{RawData: map[string]any{"x": 1}},
 	}
-	expected := []string{"text", "image", "file", "tool_use", "tool_result", "thinking", "audio", "raw"}
+	expected := []string{"text", "image", "file", "video", "tool_use", "tool_result", "thinking", "audio", "raw"}
 
 	for i, block := range blocks {
 		if block.blockType() != expected[i] {

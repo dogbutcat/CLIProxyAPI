@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/oagmsg"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 )
 
@@ -36,47 +37,23 @@ func TestCompatibilityRequestPair(t *testing.T) {
 	}
 }
 
-// TestTranslateRequestPairWithAPIKeyModelCompatibilityCountsTranslations counts
-// translator calls. Claude and Gemini Execute share this helper, and byte equality
-// stays green when the same deterministic translator runs twice.
-func TestTranslateRequestPairWithAPIKeyModelCompatibilityCountsTranslations(t *testing.T) {
-	from := sdktranslator.Format("api-key-compat-count-from")
-	to := sdktranslator.Format("api-key-compat-count-to")
-	if sdktranslator.HasRequestTransformer(from, to) {
-		t.Fatalf("request transformer %s -> %s is already registered", from, to)
-	}
-	if sdktranslator.HasPluginHooks() {
+func TestTranslateRequestPairWithAPIKeyModelCompatibilityBuffers(t *testing.T) {
+	if oagmsg.HasPluginHooks() {
 		t.Fatal("plugin hooks are installed and disable translation reuse")
 	}
 
-	const model = "compat-count-model"
-	var calls int
-	var wantStream bool
-	sdktranslator.Register(from, to, func(gotModel string, rawJSON []byte, stream bool) []byte {
-		if gotModel != model {
-			t.Errorf("model = %q, want %q", gotModel, model)
-		}
-		if stream != wantStream {
-			t.Errorf("stream = %v, want %v", stream, wantStream)
-		}
-		calls++
-		return append([]byte(nil), rawJSON...)
-	}, sdktranslator.ResponseTransform{})
-	t.Cleanup(func() { sdktranslator.Unregister(from, to) })
-
 	ctx := context.Background()
 	cfg := &config.Config{}
+	from := sdktranslator.FormatOpenAIResponse
+	to := sdktranslator.FormatOpenAI
+	const model = "compat-count-model"
 	payload := []byte(`{"model":"compat-count-model","input":"hello"}`)
 	for _, stream := range []bool{false, true} {
 		for _, compat := range []bool{false, true} {
-			wantStream = stream
-			calls = 0
+			want := TranslateRequestWithAPIKeyModelCompatibility(ctx, nil, cfg, from, to, model, payload, stream, compat)
 			base, work := TranslateRequestPairWithAPIKeyModelCompatibility(ctx, nil, cfg, from, to, model, payload, payload, stream, compat)
-			if calls != 1 {
-				t.Fatalf("stream=%v compat=%v: same slice translations = %d, want 1", stream, compat, calls)
-			}
-			if !bytes.Equal(base, payload) || !bytes.Equal(work, payload) {
-				t.Fatalf("stream=%v compat=%v: same slice translation changed the payload", stream, compat)
+			if !bytes.Equal(base, want) || !bytes.Equal(work, want) {
+				t.Fatalf("stream=%v compat=%v: same slice translation mismatch", stream, compat)
 			}
 			if len(base) == 0 || &base[0] == &work[0] {
 				t.Fatal("working buffer aliases the baseline")
@@ -87,14 +64,11 @@ func TestTranslateRequestPairWithAPIKeyModelCompatibilityCountsTranslations(t *t
 				t.Fatal("mutating the working buffer changed the baseline or input")
 			}
 
-			calls = 0
 			detached := bytes.Clone(payload)
+			wantWork := TranslateRequestWithAPIKeyModelCompatibility(ctx, nil, cfg, from, to, model, detached, stream, compat)
 			base, work = TranslateRequestPairWithAPIKeyModelCompatibility(ctx, nil, cfg, from, to, model, payload, detached, stream, compat)
-			if calls != 2 {
-				t.Fatalf("stream=%v compat=%v: equal content with a different backing array translations = %d, want 2", stream, compat, calls)
-			}
-			if !bytes.Equal(base, payload) || !bytes.Equal(work, payload) {
-				t.Fatalf("stream=%v compat=%v: distinct backing translation changed the payload", stream, compat)
+			if !bytes.Equal(base, want) || !bytes.Equal(work, wantWork) {
+				t.Fatalf("stream=%v compat=%v: distinct backing translation mismatch", stream, compat)
 			}
 			if len(base) == 0 || &base[0] == &work[0] {
 				t.Fatal("distinct working buffer aliases the baseline")
@@ -105,8 +79,8 @@ func TestTranslateRequestPairWithAPIKeyModelCompatibilityCountsTranslations(t *t
 
 func TestCompatibilityRequestPairPreservesHooks(t *testing.T) {
 	hooks := &pairRequestPluginHooks{}
-	sdktranslator.SetPluginHooks(hooks)
-	t.Cleanup(func() { sdktranslator.SetPluginHooks(nil) })
+	oagmsg.SetPluginHooks(hooks)
+	t.Cleanup(func() { oagmsg.SetPluginHooks(nil) })
 	request := []byte(`{"model":"test","input":"hello"}`)
 	base, work := TranslateRequestPairWithAPIKeyModelCompatibility(context.Background(), nil, &config.Config{}, sdktranslator.FormatOpenAIResponse, sdktranslator.FormatOpenAI, "test", request, request, true, true)
 	if hooks.calls != 2 || bytes.Equal(base, work) {

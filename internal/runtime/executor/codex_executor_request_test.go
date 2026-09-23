@@ -22,7 +22,7 @@ func TestCodexHTTPHeadersDefaultCloakingOverridesCustomIdentity(t *testing.T) {
 		},
 	}
 
-	applyCodexHeadersFromSources(req, auth, "oauth-token", true, nil, nil)
+	applyCodexHeadersFromSources(req, auth, "oauth-token", true, &config.Config{}, nil)
 
 	if got := req.Header.Get("User-Agent"); got != codexUserAgent {
 		t.Fatalf("User-Agent = %q, want %q", got, codexUserAgent)
@@ -64,5 +64,5 @@ func TestCodexHTTPHeadersDisabledCloakingPreservesCustomIdentity(t *testing.T) {
 }
 
 func TestCodexHTTPHeadersNilRequestHeaderDoesNotPanic(t *testing.T) {
-	applyCodexCloakingHeaders(nil, nil)
+	applyCodexCloakingHeaders(nil, nil, nil)
 }

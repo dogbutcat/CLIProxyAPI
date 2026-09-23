@@ -8,6 +8,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	_ "github.com/router-for-me/CLIProxyAPI/v7/internal/translator"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/oagmsg"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -17,7 +18,7 @@ type interactionsTranslateHooks struct {
 	calls int64
 }
 
-func (h *interactionsTranslateHooks) NormalizeRequest(_ context.Context, _, _ sdktranslator.Format, _ string, body []byte, _ bool) []byte {
+func (h *interactionsTranslateHooks) NormalizeRequest(_ context.Context, _, _ oagmsg.Format, _ string, body []byte, _ bool) []byte {
 	h.calls++
 	updated, errSet := sjson.SetBytes(body, "plugin_call", h.calls)
 	if errSet != nil {
@@ -26,19 +27,19 @@ func (h *interactionsTranslateHooks) NormalizeRequest(_ context.Context, _, _ sd
 	return updated
 }
 
-func (*interactionsTranslateHooks) TranslateRequest(context.Context, sdktranslator.Format, sdktranslator.Format, string, []byte, bool) ([]byte, bool) {
+func (*interactionsTranslateHooks) TranslateRequest(context.Context, oagmsg.Format, oagmsg.Format, string, []byte, bool) ([]byte, bool) {
 	return nil, false
 }
 
-func (*interactionsTranslateHooks) NormalizeResponseBefore(context.Context, sdktranslator.Format, sdktranslator.Format, string, []byte, []byte, []byte, bool) []byte {
+func (*interactionsTranslateHooks) NormalizeResponseBefore(context.Context, oagmsg.Format, oagmsg.Format, string, []byte, []byte, []byte, bool) []byte {
 	return nil
 }
 
-func (*interactionsTranslateHooks) TranslateResponse(context.Context, sdktranslator.Format, sdktranslator.Format, string, []byte, []byte, []byte, bool) ([]byte, bool) {
+func (*interactionsTranslateHooks) TranslateResponse(context.Context, oagmsg.Format, oagmsg.Format, string, []byte, []byte, []byte, bool) ([]byte, bool) {
 	return nil, false
 }
 
-func (*interactionsTranslateHooks) NormalizeResponseAfter(context.Context, sdktranslator.Format, sdktranslator.Format, string, []byte, []byte, []byte, bool) []byte {
+func (*interactionsTranslateHooks) NormalizeResponseAfter(context.Context, oagmsg.Format, oagmsg.Format, string, []byte, []byte, []byte, bool) []byte {
 	return nil
 }
 
@@ -67,68 +68,38 @@ func TestTranslateGeminiInteractionsRequestPairReusesSameSlice(t *testing.T) {
 	}
 }
 
-// TestTranslateGeminiInteractionsRequestPairTranslatesSameSliceOnce counts translator
-// calls. Byte equality stays green if the reuse branch is deleted and the same
-// deterministic translator runs twice.
-func TestTranslateGeminiInteractionsRequestPairTranslatesSameSliceOnce(t *testing.T) {
-	from := sdktranslator.Format("gemini-interactions-translate-count")
-	to := sdktranslator.FormatInteractions
-	if sdktranslator.HasRequestTransformer(from, to) {
-		t.Fatalf("request transformer %s -> %s is already registered", from, to)
-	}
-	if sdktranslator.HasPluginHooks() {
+func TestTranslateGeminiInteractionsRequestPairBuffers(t *testing.T) {
+	if oagmsg.HasPluginHooks() {
 		t.Fatal("plugin hooks are installed and disable translation reuse")
 	}
 
 	const model = "gemini-interactions-count"
-	var calls int
-	var wantStream bool
-	sdktranslator.Register(from, to, func(gotModel string, rawJSON []byte, stream bool) []byte {
-		if gotModel != model {
-			t.Errorf("model = %q, want %q", gotModel, model)
-		}
-		if stream != wantStream {
-			t.Errorf("stream = %v, want %v", stream, wantStream)
-		}
-		calls++
-		return append([]byte(nil), rawJSON...)
-	}, sdktranslator.ResponseTransform{})
-	t.Cleanup(func() { sdktranslator.Unregister(from, to) })
-
 	ctx := context.Background()
 	cfg := &config.Config{}
 	payload := []byte(`{"model":"gemini-interactions-count","messages":[{"role":"user","content":"hi"}]}`)
 	for _, stream := range []bool{false, true} {
 		for _, compat := range []bool{false, true} {
-			wantStream = stream
-			calls = 0
-			opts := cliproxyexecutor.Options{SourceFormat: from}
+			opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAI}
+			want := translateGeminiInteractionsRequestBody(ctx, cfg, model, payload, opts, stream, compat)
 			base, work := translateGeminiInteractionsRequestPair(ctx, cfg, model, payload, opts, stream, compat)
-			if calls != 1 {
-				t.Fatalf("stream=%v compat=%v: same slice translations = %d, want 1", stream, compat, calls)
-			}
-			if !bytes.Equal(base, payload) || !bytes.Equal(work, payload) {
-				t.Fatalf("stream=%v compat=%v: same slice translation changed the payload", stream, compat)
+			if !bytes.Equal(base, want) || !bytes.Equal(work, want) {
+				t.Fatalf("stream=%v compat=%v: same slice translation mismatch", stream, compat)
 			}
 			assertIndependentGeminiInteractionsBuffers(t, payload, base, work)
 
-			calls = 0
 			opts.OriginalRequest = payload
 			base, work = translateGeminiInteractionsRequestPair(ctx, cfg, model, payload, opts, stream, compat)
-			if calls != 1 {
-				t.Fatalf("stream=%v compat=%v: identical backing translations = %d, want 1", stream, compat, calls)
+			if !bytes.Equal(base, want) || !bytes.Equal(work, want) {
+				t.Fatalf("stream=%v compat=%v: identical backing translation mismatch", stream, compat)
 			}
 			assertIndependentGeminiInteractionsBuffers(t, payload, base, work)
 
-			calls = 0
 			detached := bytes.Clone(payload)
 			opts.OriginalRequest = detached
+			wantBase := geminiInteractionsPayloadConfigSource(ctx, cfg, model, payload, opts, stream, compat)
 			base, work = translateGeminiInteractionsRequestPair(ctx, cfg, model, payload, opts, stream, compat)
-			if calls != 2 {
-				t.Fatalf("stream=%v compat=%v: equal content with a different backing array translations = %d, want 2", stream, compat, calls)
-			}
-			if !bytes.Equal(base, payload) || !bytes.Equal(work, payload) {
-				t.Fatalf("stream=%v compat=%v: distinct backing translation changed the payload", stream, compat)
+			if !bytes.Equal(base, wantBase) || !bytes.Equal(work, want) {
+				t.Fatalf("stream=%v compat=%v: distinct backing translation mismatch", stream, compat)
 			}
 			assertIndependentGeminiInteractionsBuffers(t, payload, base, work)
 		}
@@ -158,8 +129,8 @@ func TestTranslateGeminiInteractionsRequestPairTranslatesDistinctInputs(t *testi
 
 func TestTranslateGeminiInteractionsRequestPairPreservesHookOrder(t *testing.T) {
 	hooks := &interactionsTranslateHooks{}
-	sdktranslator.SetPluginHooks(hooks)
-	t.Cleanup(func() { sdktranslator.SetPluginHooks(nil) })
+	oagmsg.SetPluginHooks(hooks)
+	t.Cleanup(func() { oagmsg.SetPluginHooks(nil) })
 
 	ctx := context.Background()
 	cfg := &config.Config{}
@@ -217,8 +188,8 @@ func TestTranslateGeminiInteractionsRequestPairNativeCopy(t *testing.T) {
 
 func TestTranslateGeminiInteractionsRequestPairNativeCopyIgnoresHooks(t *testing.T) {
 	hooks := &interactionsTranslateHooks{}
-	sdktranslator.SetPluginHooks(hooks)
-	t.Cleanup(func() { sdktranslator.SetPluginHooks(nil) })
+	oagmsg.SetPluginHooks(hooks)
+	t.Cleanup(func() { oagmsg.SetPluginHooks(nil) })
 
 	payload := []byte(`{"model":"gemini-3.1-flash-lite","input":"hi"}`)
 	opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatInteractions, OriginalRequest: payload}

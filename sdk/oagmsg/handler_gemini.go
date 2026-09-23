@@ -211,7 +211,19 @@ func (h *GeminiHandler) parsePartWithToolIDState(part gjson.Result, options gemi
 		if strings.HasPrefix(mime, "image/") {
 			return ImageBlock{MediaType: mime, Data: data}
 		}
+		if strings.HasPrefix(mime, "video/") {
+			return VideoBlock{MediaType: mime, Data: data}
+		}
 		return FileBlock{MediaType: mime, Data: data}
+	}
+
+	if file := part.Get("fileData"); file.Exists() {
+		mime := file.Get("mimeType").String()
+		uri := file.Get("fileUri").String()
+		if strings.HasPrefix(mime, "video/") {
+			return VideoBlock{MediaType: mime, URL: uri}
+		}
+		return FileBlock{MediaType: mime, URL: uri}
 	}
 
 	// functionCall -> ToolUseBlock
@@ -370,6 +382,22 @@ func (h *GeminiHandler) serializeOneContentForRequest(req *UnifiedRequest, msg O
 					"inlineData": map[string]any{
 						"mimeType": block.MediaType,
 						"data":     block.Data,
+					},
+				})
+			}
+		case VideoBlock:
+			if block.Data != "" && block.MediaType != "" {
+				parts = append(parts, map[string]any{
+					"inlineData": map[string]any{
+						"mimeType": block.MediaType,
+						"data":     block.Data,
+					},
+				})
+			} else if block.URL != "" {
+				parts = append(parts, map[string]any{
+					"fileData": map[string]any{
+						"mimeType": "video/*",
+						"fileUri":  block.URL,
 					},
 				})
 			}

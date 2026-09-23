@@ -354,6 +354,8 @@ func (h *InteractionsHandler) parseInputItem(itemType string, item gjson.Result,
 					if image := parseResponsesImagePart(cb); image != nil {
 						blocks = append(blocks, withParsedCacheControl(image, cacheCtrl))
 					}
+				case "input_video", "video_url":
+					blocks = append(blocks, withParsedCacheControl(parseResponsesVideoPart(cb), cacheCtrl))
 				case "input_file":
 					if file := parseResponsesFilePart(cb); file != nil {
 						blocks = append(blocks, withParsedCacheControl(file, cacheCtrl))
@@ -543,6 +545,7 @@ func resolveResponsesHistoryToolName(item gjson.Result, index toolDescriptorInde
 
 func parseResponsesImagePart(part gjson.Result) ContentBlock {
 	imageURL := ""
+	detail := part.Get("detail").String()
 	if url := part.Get("image_url"); url.Exists() && url.String() != "" {
 		imageURL = url.String()
 	} else if url := part.Get("url"); url.Exists() && url.String() != "" {
@@ -554,14 +557,29 @@ func parseResponsesImagePart(part gjson.Result) ContentBlock {
 			if !ok {
 				return nil
 			}
-			return ImageBlock{MediaType: mediaType, Data: data}
+			return ImageBlock{MediaType: mediaType, Data: data, Detail: detail}
 		}
-		return ImageBlock{URL: imageURL}
+		return ImageBlock{URL: imageURL, Detail: detail}
 	}
 	if data := part.Get("image_data"); data.Exists() {
-		return ImageBlock{Data: data.String()}
+		return ImageBlock{Data: data.String(), Detail: detail}
 	}
 	return nil
+}
+
+func parseResponsesVideoPart(part gjson.Result) VideoBlock {
+	processing := part.Get("processing").String()
+	urlValue := part.Get("video_url")
+	if urlValue.IsObject() {
+		if processing == "" {
+			processing = urlValue.Get("processing").String()
+		}
+		urlValue = urlValue.Get("url")
+	}
+	if !urlValue.Exists() {
+		urlValue = part.Get("url")
+	}
+	return parseVideoURLValue(urlValue, processing)
 }
 
 func parseResponsesFilePart(part gjson.Result) ContentBlock {
@@ -600,6 +618,8 @@ func blockHasCacheControl(block ContentBlock) bool {
 		return b.CacheControl != nil
 	case FileBlock:
 		return b.CacheControl != nil
+	case VideoBlock:
+		return b.CacheControl != nil
 	case ToolResultBlock:
 		return b.CacheControl != nil
 	case CustomToolResultBlock:
@@ -624,6 +644,9 @@ func withParsedCacheControl(block ContentBlock, cacheControl map[string]any) Con
 		b.CacheControl = cacheControl
 		return b
 	case FileBlock:
+		b.CacheControl = cacheControl
+		return b
+	case VideoBlock:
 		b.CacheControl = cacheControl
 		return b
 	case ToolResultBlock:
@@ -757,6 +780,9 @@ func (h *InteractionsHandler) serializeOneItemForRequest(req *UnifiedRequest, ms
 			} else if block.Data != "" {
 				content["image_data"] = block.Data
 			}
+			if block.Detail != "" {
+				content["detail"] = block.Detail
+			}
 			items = append(items, map[string]any{
 				"type":    "message",
 				"role":    interactionsRole(msg.Role),
@@ -772,6 +798,28 @@ func (h *InteractionsHandler) serializeOneItemForRequest(req *UnifiedRequest, ms
 				"type":      "input_file",
 				"filename":  block.Filename,
 				"file_data": fileData,
+			}
+			items = append(items, map[string]any{
+				"type":    "message",
+				"role":    interactionsRole(msg.Role),
+				"content": []any{content},
+			})
+
+		case VideoBlock:
+			content := map[string]any{"type": "input_video"}
+			switch {
+			case block.URLRaw != nil:
+				content["video_url"] = block.URLRaw
+			case block.URL != "":
+				content["video_url"] = block.URL
+			case block.Data != "" && block.MediaType != "":
+				content["video_url"] = "data:" + block.MediaType + ";base64," + block.Data
+			}
+			if block.Processing != "" {
+				content["processing"] = block.Processing
+			}
+			if block.CacheControl != nil {
+				content["cache_control"] = block.CacheControl
 			}
 			items = append(items, map[string]any{
 				"type":    "message",

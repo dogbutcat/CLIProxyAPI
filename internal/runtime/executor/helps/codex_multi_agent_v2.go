@@ -87,7 +87,7 @@ func sameByteSlice(a, b []byte) bool {
 // inputs twice while retaining separate buffers and stateful plugin invocations.
 func TranslateRequestPairWithAPIKeyModelCompatibility(ctx context.Context, headers http.Header, cfg *config.Config, from, to sdktranslator.Format, model string, originalPayload, requestPayload []byte, stream, isCompat bool) (original, working []byte) {
 	original = TranslateRequestWithAPIKeyModelCompatibility(ctx, headers, cfg, from, to, model, originalPayload, stream, isCompat)
-	if sameByteSlice(originalPayload, requestPayload) && !sdktranslator.HasPluginHooks() {
+	if sameByteSlice(originalPayload, requestPayload) && !oagmsg.HasPluginHooks() {
 		return original, append([]byte(nil), original...)
 	}
 	return original, TranslateRequestWithAPIKeyModelCompatibility(ctx, headers, cfg, from, to, model, requestPayload, stream, isCompat)
