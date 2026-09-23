@@ -15,18 +15,19 @@ import (
 // ----------------------------------------------------------------
 
 func TestContentBlockInterface(t *testing.T) {
-	// All 9 block types must implement ContentBlock
+	// All canonical block types must implement ContentBlock.
 	blocks := []ContentBlock{
 		TextBlock{Text: "hello"},
 		ImageBlock{MediaType: "image/png", Data: "base64data"},
 		FileBlock{Filename: "test.pdf", MediaType: "application/pdf", Data: "pdfdata"},
+		VideoBlock{MediaType: "video/mp4", Data: "videodata"},
 		ToolUseBlock{ID: "call_1", Name: "read_file", Input: map[string]any{"path": "/tmp"}},
 		ToolResultBlock{ToolUseID: "call_1", Content: "file contents"},
 		RawBlock{RawData: map[string]any{"custom": "data"}},
 	}
 
 	expectedTypes := []string{
-		"text", "image", "file", "tool_use", "tool_result", "raw",
+		"text", "image", "file", "video", "tool_use", "tool_result", "raw",
 	}
 
 	for i, block := range blocks {

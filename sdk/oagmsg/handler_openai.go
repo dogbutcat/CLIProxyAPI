@@ -300,17 +300,18 @@ func (h *OpenAIHandler) parseContentBlock(blkType string, block gjson.Result) Co
 
 	case "image_url":
 		url := block.Get("image_url.url").String()
+		detail := block.Get("image_url.detail").String()
 		if strings.HasPrefix(url, "data:") {
 			meta, data, _ := strings.Cut(url[5:], ",")
 			mime := strings.Split(meta, ";")[0]
-			ib := ImageBlock{MediaType: mime, Data: data}
+			ib := ImageBlock{MediaType: mime, Data: data, Detail: detail}
 			if cacheCtrl != nil {
 				ib.CacheControl = cacheCtrl
 			}
 			return ib
 		}
 		if url != "" {
-			ib := ImageBlock{URL: url}
+			ib := ImageBlock{URL: url, Detail: detail}
 			if cacheCtrl != nil {
 				ib.CacheControl = cacheCtrl
 			}
@@ -319,11 +320,17 @@ func (h *OpenAIHandler) parseContentBlock(blkType string, block gjson.Result) Co
 		return nil
 
 	case "video_url":
-		videoURL := block.Get("video_url.url").String()
-		if fb := parseFileData("", videoURL); fb != nil {
-			return fb
+		video := parseChatVideoPart(block)
+		if cacheCtrl != nil {
+			video.CacheControl = cacheCtrl
 		}
-		return nil
+		return video
+	case "input_video":
+		video := parseResponsesVideoPart(block)
+		if cacheCtrl != nil {
+			video.CacheControl = cacheCtrl
+		}
+		return video
 
 	case "file", "input_file", "document":
 		fileObj := block.Get("file")
@@ -433,14 +440,22 @@ func (h *OpenAIHandler) serializeOneMessageForRequest(req *UnifiedRequest, msg O
 		case ImageBlock:
 			if block.Data != "" {
 				url := fmt.Sprintf("data:%s;base64,%s", block.MediaType, block.Data)
+				imageURL := map[string]any{"url": url}
+				if block.Detail != "" {
+					imageURL["detail"] = block.Detail
+				}
 				contentBlocks = append(contentBlocks, map[string]any{
 					"type":      "image_url",
-					"image_url": map[string]any{"url": url},
+					"image_url": imageURL,
 				})
 			} else if block.URL != "" {
+				imageURL := map[string]any{"url": block.URL}
+				if block.Detail != "" {
+					imageURL["detail"] = block.Detail
+				}
 				contentBlocks = append(contentBlocks, map[string]any{
 					"type":      "image_url",
-					"image_url": map[string]any{"url": block.URL},
+					"image_url": imageURL,
 				})
 			}
 		case FileBlock:
@@ -462,6 +477,15 @@ func (h *OpenAIHandler) serializeOneMessageForRequest(req *UnifiedRequest, msg O
 					},
 				})
 			}
+		case VideoBlock:
+			cb := map[string]any{
+				"type":      "video_url",
+				"video_url": openAIVideoURLObject(block),
+			}
+			if block.CacheControl != nil {
+				cb["cache_control"] = block.CacheControl
+			}
+			contentBlocks = append(contentBlocks, cb)
 		case ToolUseBlock:
 			inputJSON, _ := json.Marshal(block.Input)
 			toolCalls = append(toolCalls, map[string]any{
@@ -1038,6 +1062,56 @@ func parseFileData(filename, rawData string) ContentBlock {
 		MediaType: mimeType,
 		Data:      payload,
 	}
+}
+
+func parseChatVideoPart(block gjson.Result) VideoBlock {
+	videoObj := block.Get("video_url")
+	urlValue := videoObj.Get("url")
+	processing := videoObj.Get("processing").String()
+	if !urlValue.Exists() {
+		urlValue = videoObj
+	}
+	if processing == "" {
+		processing = block.Get("processing").String()
+	}
+	return parseVideoURLValue(urlValue, processing)
+}
+
+func parseVideoURLValue(urlValue gjson.Result, processing string) VideoBlock {
+	video := VideoBlock{Processing: processing}
+	if !urlValue.Exists() || urlValue.Type == gjson.Null {
+		return video
+	}
+	if urlValue.Type != gjson.String {
+		video.URLRaw = urlValue.Value()
+		return video
+	}
+	url := urlValue.String()
+	if strings.HasPrefix(url, "data:") {
+		if mediaType, data, ok := splitBase64DataURL(url); ok {
+			video.MediaType = mediaType
+			video.Data = data
+			return video
+		}
+	}
+	video.URL = url
+	return video
+}
+
+func openAIVideoURLObject(block VideoBlock) map[string]any {
+	videoURL := map[string]any{}
+	switch {
+	case block.URLRaw != nil:
+		videoURL["url"] = block.URLRaw
+	case block.URL != "":
+		videoURL["url"] = block.URL
+	case block.Data != "" && block.MediaType != "":
+		videoURL["url"] = "data:" + block.MediaType + ";base64," + block.Data
+	}
+	if block.Processing != "" {
+		videoURL["processing"] = block.Processing
+	}
+	return videoURL
 }
 
 // rawBlock creates a RawBlock from a gjson.Result.

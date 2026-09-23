@@ -1120,13 +1120,17 @@ func TestApplyCodexWebsocketHeadersDefaultsToCurrentResponsesBeta(t *testing.T) 
 
 func TestApplyCodexWebsocketHeadersDefaultsToCodexCloaking(t *testing.T) {
 	tests := []struct {
-		name      string
-		auth      *cliproxyauth.Auth
-		token     string
-		nilConfig bool
+		name       string
+		auth       *cliproxyauth.Auth
+		token      string
+		nilConfig  bool
+		wantUA     string
+		wantOrigin string
 	}{
 		{
-			name: "OAuth",
+			name:       "OAuth",
+			wantUA:     codexUserAgent,
+			wantOrigin: codexOriginator,
 			auth: &cliproxyauth.Auth{
 				Provider: "codex",
 				Attributes: map[string]string{
@@ -1136,8 +1140,10 @@ func TestApplyCodexWebsocketHeadersDefaultsToCodexCloaking(t *testing.T) {
 			},
 		},
 		{
-			name:      "OAuth nil config",
-			nilConfig: true,
+			name:       "OAuth nil config",
+			nilConfig:  true,
+			wantUA:     "custom-ua",
+			wantOrigin: "custom-origin",
 			auth: &cliproxyauth.Auth{
 				Provider: "codex",
 				Attributes: map[string]string{
@@ -1148,7 +1154,9 @@ func TestApplyCodexWebsocketHeadersDefaultsToCodexCloaking(t *testing.T) {
 			},
 		},
 		{
-			name: "API key",
+			name:       "API key",
+			wantUA:     codexUserAgent,
+			wantOrigin: codexOriginator,
 			auth: &cliproxyauth.Auth{
 				Provider: "codex",
 				Attributes: map[string]string{
@@ -1179,11 +1187,11 @@ func TestApplyCodexWebsocketHeadersDefaultsToCodexCloaking(t *testing.T) {
 
 			headers = applyCodexWebsocketHeaders(ctx, headers, tt.auth, tt.token, cfg, false)
 
-			if got := headers.Get("User-Agent"); got != codexUserAgent {
-				t.Fatalf("User-Agent = %q, want %q", got, codexUserAgent)
+			if got := headers.Get("User-Agent"); got != tt.wantUA {
+				t.Fatalf("User-Agent = %q, want %q", got, tt.wantUA)
 			}
-			if got := headers.Get("Originator"); got != codexOriginator {
-				t.Fatalf("Originator = %q, want %q", got, codexOriginator)
+			if got := headers.Get("Originator"); got != tt.wantOrigin {
+				t.Fatalf("Originator = %q, want %q", got, tt.wantOrigin)
 			}
 			if tt.name == "OAuth nil config" {
 				if got := headers.Get("X-Custom"); got != "custom-value" {

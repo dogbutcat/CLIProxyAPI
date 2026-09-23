@@ -7,6 +7,7 @@ package oagmsg
 //	TextBlock          OpenAI text        | Anthropic text       | Gemini {text}
 //	ImageBlock         OpenAI image_url   | Anthropic image      | Gemini inlineData(image/*)
 //	FileBlock          OpenAI file        | Anthropic document   | Gemini inlineData(application/*)
+//	VideoBlock         OpenAI video_url   | Responses input_video| Gemini inlineData(video/*)
 //	ToolUseBlock       OpenAI tool_calls  | Anthropic tool_use   | Gemini functionCall
 //	ToolResultBlock    OpenAI role=tool   | Anthropic tool_result| Gemini functionResponse
 //	CustomToolUseBlock OpenAI custom_tool_call freeform input
@@ -42,6 +43,7 @@ type ImageBlock struct {
 	MediaType    string         `json:"media_type"` // e.g. "image/png"
 	Data         string         `json:"data,omitempty"`
 	URL          string         `json:"url,omitempty"`
+	Detail       string         `json:"detail,omitempty"` // OpenAI image detail hint
 	CacheControl map[string]any `json:"cache_control,omitempty"`
 }
 
@@ -77,6 +79,23 @@ type claudeDocumentSource struct {
 	data       string
 	base64     string
 }
+
+// ----------------------------------------------------------------
+// VideoBlock - video content (base64 or URL)
+// ----------------------------------------------------------------
+
+// VideoBlock represents video input content. It keeps malformed URL values so
+// OpenAI-compatible targets can defer validation to the upstream API.
+type VideoBlock struct {
+	MediaType    string         `json:"media_type,omitempty"` // e.g. "video/mp4"
+	Data         string         `json:"data,omitempty"`       // raw base64 encoded content
+	URL          string         `json:"url,omitempty"`
+	URLRaw       any            `json:"-"`
+	Processing   string         `json:"processing,omitempty"` // "agentic", "static", etc.
+	CacheControl map[string]any `json:"cache_control,omitempty"`
+}
+
+func (VideoBlock) blockType() string { return "video" }
 
 // ----------------------------------------------------------------
 // ToolUseBlock - assistant requests a tool call
