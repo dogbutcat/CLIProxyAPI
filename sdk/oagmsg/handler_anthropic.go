@@ -72,6 +72,7 @@ func (h *AnthropicHandler) ParseRequest(rawJSON []byte) (*UnifiedRequest, error)
 			}
 		}
 	}
+	req.responsesServiceTier = anthropicResponsesServiceTierForRequest(root)
 	if config := ExtractAnthropicThinking(root); config != nil {
 		req.SetThinking(config)
 	}
@@ -911,6 +912,27 @@ func anthropicSpeedForRequest(req *UnifiedRequest) (string, bool) {
 		return "fast", true
 	}
 	return "", false
+}
+
+func anthropicResponsesServiceTierForRequest(root gjson.Result) string {
+	serviceTier := normalizeAnthropicResponsesServiceTier(root.Get("service_tier"))
+	speed := root.Get("speed")
+	if speed.Type == gjson.String && strings.EqualFold(strings.TrimSpace(speed.String()), "fast") {
+		serviceTier = "priority"
+	}
+	return serviceTier
+}
+
+func normalizeAnthropicResponsesServiceTier(result gjson.Result) string {
+	if !result.Exists() || result.Type != gjson.String {
+		return ""
+	}
+	switch strings.ToLower(strings.TrimSpace(result.String())) {
+	case "fast", "priority":
+		return "priority"
+	default:
+		return ""
+	}
 }
 
 func shouldDedupeAnthropicToolResults(req *UnifiedRequest) bool {

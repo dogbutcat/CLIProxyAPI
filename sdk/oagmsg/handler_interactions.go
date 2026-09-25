@@ -993,6 +993,9 @@ func (h *InteractionsHandler) serializeRequest(req *UnifiedRequest, systemAsInst
 	} else if req.maxTokens.present && req.maxTokens.isNull {
 		out["max_output_tokens"] = nil
 	}
+	if req.responsesServiceTier != "" {
+		out["service_tier"] = req.responsesServiceTier
+	}
 	if len(req.Tools) > 0 {
 		normalized := make([]map[string]any, 0, len(req.Tools))
 		for _, tool := range req.Tools {
