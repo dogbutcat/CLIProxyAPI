@@ -11,6 +11,7 @@ import (
 
 	"github.com/google/uuid"
 	xaiauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/xai"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
@@ -63,7 +64,8 @@ func (e *XAIExecutor) prepareResponsesRequestTo(ctx context.Context, req cliprox
 
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	requestPath := helps.PayloadRequestPath(opts)
-	body = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, to.String(), from.String(), "", body, originalTranslated, requestedModel, requestPath, opts.Headers)
+	var reasoningEffortOverridden bool
+	body, reasoningEffortOverridden = helps.ApplyPayloadConfigWithRequestTracked(e.cfg, baseModel, to.String(), from.String(), "", body, originalTranslated, requestedModel, requestPath, opts.Headers, "reasoning.effort")
 	body = helps.SetStringIfDifferent(body, "model", baseModel)
 	body = helps.SetBoolIfDifferent(body, "stream", stream)
 	body, _ = sjson.DeleteBytes(body, "previous_response_id")
@@ -91,7 +93,7 @@ func (e *XAIExecutor) prepareResponsesRequestTo(ctx context.Context, req cliprox
 	body = normalizeXAIInputReasoningItems(body)
 	body = sanitizeXAIInputEncryptedContent(body)
 	body = normalizeCodexInstructions(body)
-	body = sanitizeXAIResponsesBody(body, baseModel)
+	body = sanitizeXAIResponsesBody(body, baseModel, reasoningEffortOverridden)
 	body = normalizeXAIImageRefs(body)
 
 	sessionID, errSession := xaiResolveComposerSessionID(ctx, req, opts, baseModel)
@@ -486,10 +488,10 @@ func xaiMetadataString(meta map[string]any, key string) string {
 	}
 }
 
-func sanitizeXAIResponsesBody(body []byte, model string) []byte {
+func sanitizeXAIResponsesBody(body []byte, model string, reasoningEffortOverridden bool) []byte {
 	// stop is supported by Chat Completions but not by xAI's Responses API.
 	body, _ = sjson.DeleteBytes(body, "stop")
-	if !xaiSupportsReasoningEffort(model) {
+	if !reasoningEffortOverridden && !xaiSupportsReasoningEffort(model) {
 		if gjson.GetBytes(body, "reasoning.effort").Exists() {
 			log.Debugf("xai: stripping reasoning.effort for model %s (no thinking levels in model registry)", model)
 		}
@@ -499,6 +501,23 @@ func sanitizeXAIResponsesBody(body []byte, model string) []byte {
 		}
 	}
 	return body
+}
+
+func xaiSupportsReasoningEffort(model string) bool {
+	name := strings.TrimSpace(thinking.ParseSuffix(model).ModelName)
+	if name == "" {
+		return false
+	}
+	info := registry.LookupModelInfo(name, "xai")
+	if info == nil {
+		// Remote or user-configured model catalogs can be newer than the local
+		// registry. Keep reasoning.effort unless the registry explicitly says no.
+		return true
+	}
+	if info.UserDefined {
+		return true
+	}
+	return info.Thinking != nil
 }
 
 // xaiGrokImageGenerationMinVersion is the first Grok line that accepts xAI's

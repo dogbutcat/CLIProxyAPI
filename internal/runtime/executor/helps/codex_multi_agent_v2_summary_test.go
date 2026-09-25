@@ -20,7 +20,7 @@ func TestCompatibilityTranslationPreservesExplicitClaudeVisibility(t *testing.T)
 					payload string
 					want    string
 				}{
-					{name: "chat effort only", from: sdktranslator.FormatOpenAI, payload: `{"reasoning_effort":"high","messages":[{"role":"user","content":"hi"}]}`},
+					{name: "chat effort only", from: sdktranslator.FormatOpenAI, payload: `{"reasoning_effort":"high","messages":[{"role":"user","content":"hi"}]}`, want: "summarized"},
 					{name: "chat show", from: sdktranslator.FormatOpenAI, payload: `{"reasoning_effort":"high","include_reasoning":true,"messages":[{"role":"user","content":"hi"}]}`, want: "summarized"},
 					{name: "chat hide", from: sdktranslator.FormatOpenAI, payload: `{"reasoning_effort":"high","reasoning":{"exclude":true},"messages":[{"role":"user","content":"hi"}]}`, want: "omitted"},
 					{name: "responses effort only", from: sdktranslator.FormatOpenAIResponse, payload: `{"reasoning":{"effort":"high"},"input":"hi"}`},

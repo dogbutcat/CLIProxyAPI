@@ -42,6 +42,44 @@ func TestUpstreamCodexResponsesStripsNestedPromptCacheBreakpoints(t *testing.T) 
 	}
 }
 
+func TestUpstreamClaudeFastSpeedToCodexServiceTier(t *testing.T) {
+	tests := []struct {
+		name    string
+		payload string
+		want    string
+	}{
+		{
+			name:    "speed fast",
+			payload: `{"model":"gpt-5.5","max_tokens":64,"speed":"fast","messages":[{"role":"user","content":"hi"}]}`,
+			want:    "priority",
+		},
+		{
+			name:    "service tier fast",
+			payload: `{"model":"gpt-5.5","max_tokens":64,"service_tier":"fast","messages":[{"role":"user","content":"hi"}]}`,
+			want:    "priority",
+		},
+		{
+			name:    "unsupported tier",
+			payload: `{"model":"gpt-5.5","max_tokens":64,"service_tier":"default","messages":[{"role":"user","content":"hi"}]}`,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			out := TranslateRequest(FormatAnthropic, FormatCodex, "gpt-5.5", []byte(test.payload), true)
+			tier := gjson.GetBytes(out, "service_tier")
+			if test.want == "" {
+				if tier.Exists() {
+					t.Fatalf("service_tier = %s, want absent; output=%s", tier.Raw, out)
+				}
+				return
+			}
+			if tier.String() != test.want {
+				t.Fatalf("service_tier = %q, want %q; output=%s", tier.String(), test.want, out)
+			}
+		})
+	}
+}
+
 func TestUpstreamCodexStrictJSONSchemaDowngradesOptionalProperties(t *testing.T) {
 	raw := []byte(`{
 		"model":"gpt-5.2",
