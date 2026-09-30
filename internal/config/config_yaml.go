@@ -95,6 +95,12 @@ func SaveConfigPreserveComments(configFile string, cfg *Config, migrateV8 ...boo
 		if err != nil {
 			return err
 		}
+		if cfg != nil && cfg.PreserveNullRouting {
+			data, err = ensureNullRoutingLayout(data)
+			if err != nil {
+				return err
+			}
+		}
 		migrated = new(Config)
 		if err = yaml.Unmarshal(data, migrated); err != nil {
 			return fmt.Errorf("decode migrated config: %w", err)
@@ -108,6 +114,42 @@ func SaveConfigPreserveComments(configFile string, cfg *Config, migrateV8 ...boo
 		cfg.OAuthOnlyFields = migrated.OAuthOnlyFields
 	}
 	return nil
+}
+
+func ensureNullRoutingLayout(data []byte) ([]byte, error) {
+	var doc yaml.Node
+	if err := yaml.Unmarshal(data, &doc); err != nil {
+		return nil, err
+	}
+	if doc.Kind != yaml.DocumentNode || len(doc.Content) == 0 || doc.Content[0] == nil {
+		return nil, fmt.Errorf("invalid yaml document structure")
+	}
+	root := doc.Content[0]
+	if root.Kind != yaml.MappingNode {
+		return nil, fmt.Errorf("expected root mapping node")
+	}
+	for _, path := range v8Paths {
+		if !strings.HasPrefix(path.current, "routing.") || path.old == "routing" {
+			continue
+		}
+		value := yamlPath(root, path.current)
+		if value == nil {
+			continue
+		}
+		setYAMLPath(root, path.old, deepCopyNode(value))
+	}
+	setYAMLPath(root, "routing", &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!null", Value: ""})
+	var buf bytes.Buffer
+	enc := yaml.NewEncoder(&buf)
+	enc.SetIndent(2)
+	if err := enc.Encode(&doc); err != nil {
+		_ = enc.Close()
+		return nil, err
+	}
+	if err := enc.Close(); err != nil {
+		return nil, err
+	}
+	return NormalizeCommentIndentation(buf.Bytes()), nil
 }
 
 // SaveConfigPreserveCommentsUpdateNestedScalar updates a nested scalar key path like ["a","b"]

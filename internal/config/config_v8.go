@@ -59,6 +59,7 @@ func buildV8Paths() []configPath {
 		{"logs-max-total-size-mb", "observability.logs.logs-max-total-size-mb"}, {"request-log", "observability.logs.request-log"},
 		{"error-logs-max-files", "observability.logs.error-logs-max-files"},
 		{"usage-statistics-enabled", "observability.usage.usage-statistics-enabled"},
+		{"usage-import-session", "observability.usage.usage-import-session"},
 		{"redis-usage-queue-retention-seconds", "observability.usage.redis-usage-queue-retention-seconds"}, {"pprof", "observability.pprof"},
 	}
 	var out []configPath
@@ -149,9 +150,20 @@ func legacyPath(root *yaml.Node, path string) *yaml.Node {
 	return node
 }
 
+func shouldPreserveNullRouting(node *yaml.Node) bool {
+	routing := yamlPath(node, "routing")
+	if routing == nil || routing.Tag != "!!null" {
+		return false
+	}
+	return yamlPath(node, "port") != nil ||
+		yamlPath(node, "server") != nil ||
+		yamlPath(node, "config-version") != nil
+}
+
 // UnmarshalYAML accepts both layouts, including partially migrated documents.
 // Presence, rather than Go zero values, determines which setting wins.
 func (cfg *Config) UnmarshalYAML(node *yaml.Node) error {
+	preserveNullRouting := shouldPreserveNullRouting(node)
 	root, err := flattenV8(node)
 	if err != nil {
 		return err
@@ -161,6 +173,7 @@ func (cfg *Config) UnmarshalYAML(node *yaml.Node) error {
 		return err
 	}
 	*cfg = Config(decoded)
+	cfg.PreserveNullRouting = preserveNullRouting
 	cfg.OAuthOnlyFields = nil
 	source := expandConfigAliases(node)
 	for _, path := range v8Paths {
@@ -350,6 +363,9 @@ func NormalizeConfigLayout(data []byte, migrate bool) ([]byte, bool, error) {
 	for _, path := range v8StructPaths {
 		old := yamlPath(root, path.old)
 		if old == nil || (!migrate && yamlPath(root, path.current) == nil) {
+			continue
+		}
+		if path.old == "routing" && old.Tag == "!!null" {
 			continue
 		}
 		if old.Tag == "!!null" {

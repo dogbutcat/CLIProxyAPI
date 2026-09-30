@@ -56,6 +56,9 @@ func (cfg *Config) NormalizeRoutingConfig() {
 	if cfg == nil {
 		return
 	}
+	if cfg.PreserveNullRouting {
+		return
+	}
 	if strategy, ok := NormalizeRoutingStrategy(cfg.Routing.Strategy); ok {
 		cfg.Routing.Strategy = strategy
 	}

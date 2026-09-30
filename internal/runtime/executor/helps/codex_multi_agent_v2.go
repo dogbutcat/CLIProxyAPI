@@ -108,7 +108,8 @@ func TranslateRequestWithAPIKeyModelCompatibilityAndUpdateIntent(ctx context.Con
 		translated := TranslateRequestEnvelopeWithCodexMultiAgentV2(ctx, headers, cfg, from, to, sdktranslator.RequestEnvelope{Format: from, Model: model, Stream: stream, Body: payload})
 		return translated.Body, translated.ConfigurationUpdatesChanged
 	}
-	return TranslateRequestWithAPIKeyModelCompatibility(ctx, headers, cfg, from, to, model, payload, stream, isCompat), false
+	body := TranslateRequestWithAPIKeyModelCompatibility(ctx, headers, cfg, from, to, model, payload, stream, isCompat)
+	return body, false
 }
 
 // TranslateRequestWithAPIKeyModelCompatibility applies compatibility-aware

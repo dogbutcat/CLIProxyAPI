@@ -556,6 +556,12 @@ func NormalizeXAIForcedWebSearchToolChoice(body []byte) []byte {
 	return normalizeXAIHostedWebSearchAllowedToolsChoice(body)
 }
 
+// NormalizeXAIHostedWebSearchOnlyChoiceForUpstream collapses an allowed_tools
+// choice that only permits hosted web_search into xAI's scalar tool_choice form.
+func NormalizeXAIHostedWebSearchOnlyChoiceForUpstream(body []byte) []byte {
+	return normalizeXAIHostedWebSearchAllowedToolsChoice(body)
+}
+
 func normalizeXAIHostedWebSearchAllowedToolsChoice(body []byte) []byte {
 	choice := gjson.GetBytes(body, "tool_choice")
 	if !choice.IsObject() || strings.TrimSpace(choice.Get("type").String()) != "allowed_tools" {

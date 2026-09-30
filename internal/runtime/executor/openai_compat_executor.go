@@ -940,7 +940,7 @@ func (e *OpenAICompatExecutor) applyPromptCacheKey(ctx context.Context, auth *cl
 	}
 	provider := strings.TrimSpace(e.provider)
 	if provider == "" {
-		if compat := e.resolveCompatConfig(auth); compat != nil {
+		if compat := e.resolveCompatConfig(auth, req); compat != nil {
 			provider = strings.TrimSpace(compat.Name)
 		}
 	}
@@ -1039,7 +1039,37 @@ func (e *OpenAICompatExecutor) resolveCompatConfig(auth *cliproxyauth.Auth, req 
 			}
 		}
 	}
+	if support, ok := openAICompatMetadataBool(auth.Metadata, "support_prompt_cache_key"); ok {
+		name := strings.TrimSpace(e.provider)
+		if name == "" && auth != nil {
+			name = strings.TrimSpace(auth.Provider)
+		}
+		return &config.OpenAICompatibility{
+			Name:                  name,
+			SupportPromptCacheKey: support,
+		}
+	}
 	return nil
+}
+
+func openAICompatMetadataBool(metadata map[string]any, key string) (bool, bool) {
+	if metadata == nil {
+		return false, false
+	}
+	raw, ok := metadata[key]
+	if !ok {
+		return false, false
+	}
+	switch value := raw.(type) {
+	case bool:
+		return value, true
+	case string:
+		parsed, errParse := strconv.ParseBool(strings.TrimSpace(value))
+		if errParse == nil {
+			return parsed, true
+		}
+	}
+	return false, false
 }
 
 func (e *OpenAICompatExecutor) hasAuthoritativeCompatConfigIndex(auth *cliproxyauth.Auth) bool {

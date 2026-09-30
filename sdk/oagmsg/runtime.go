@@ -106,7 +106,9 @@ func TranslateRequestEnvelopeWithOptions[From ~string, To ~string](ctx context.C
 	options.modelInfo = req.ModelInfo
 	from := Format(fromValue)
 	to := Format(toValue)
-	req.Body = translateRequestWithOptionsContext(ctx, from, to, req.Model, req.Body, req.Stream, options)
+	var updatesChanged bool
+	req.Body, updatesChanged = translateRequestWithOptionsContext(ctx, from, to, req.Model, req.Body, req.Stream, options)
+	req.ConfigurationUpdatesChanged = req.ConfigurationUpdatesChanged || updatesChanged
 	req.Format = sdktranslator.Format(to.String())
 	return req
 }
@@ -116,28 +118,30 @@ func TranslateRequestEnvelopeWithOptions[From ~string, To ~string](ctx context.C
 func TranslateRequestWithOptions[From ~string, To ~string](fromValue From, toValue To, model string, rawJSON []byte, stream bool, options RequestTranslationOptions) []byte {
 	from := Format(fromValue)
 	to := Format(toValue)
-	return translateRequestWithOptionsContext(context.Background(), from, to, model, rawJSON, stream, options)
+	body, _ := translateRequestWithOptionsContext(context.Background(), from, to, model, rawJSON, stream, options)
+	return body
 }
 
-func translateRequestWithOptionsContext(ctx context.Context, from, to Format, model string, rawJSON []byte, stream bool, options RequestTranslationOptions) []byte {
+func translateRequestWithOptionsContext(ctx context.Context, from, to Format, model string, rawJSON []byte, stream bool, options RequestTranslationOptions) ([]byte, bool) {
 	hooks := currentPluginHooks()
 	body := normalizeResponsesAgentMessagesForTranslation(from, to, rawJSON, options)
 	body = restoreGeminiResponsesTextSignaturesForTarget(from, to, model, body)
 
 	switch translationPath := selectRequestTranslationPath(from, to, model, body, hooks); translationPath {
 	case requestTranslationPathIdentity:
-		return finalizeRequestForTarget(to, body, stream)
+		return finalizeRequestForTarget(to, body, stream), false
 	case requestTranslationPathSameWire:
 		fallthrough
 	case requestTranslationPathCodexFinalize:
 		body := setRuntimeModel(body, model)
+		updatesChanged := false
 		if hooks != nil {
-			body = hooks.NormalizeRequest(ctx, from, to, model, body, stream)
+			body, updatesChanged = normalizeRequestWithUpdateTracking(hooks, ctx, from, to, model, body, stream)
 		}
 		body = applyCodexRequestMetadataForTarget(to, body, rawJSON)
 		// Codex target constraints must be enforced after same-family hooks
 		// (e.g., OpenAI Responses → Codex) so hooks cannot reintroduce rejects.
-		return finalizeRequestForTarget(to, body, stream)
+		return finalizeRequestForTarget(to, body, stream), updatesChanged
 	default:
 	}
 
@@ -156,14 +160,15 @@ func translateRequestWithOptionsContext(ctx context.Context, from, to Format, mo
 			if err == nil {
 				body = preserveUnknownFieldsForSource(from, rawJSON, body)
 				body = thinking.ApplySummaryConfigForModel(body, to.String(), req.Model, summaryConfig)
+				updatesChanged := false
 				if hooks != nil {
-					body = hooks.NormalizeRequest(ctx, from, to, req.Model, body, stream)
+					body, updatesChanged = normalizeRequestWithUpdateTracking(hooks, ctx, from, to, req.Model, body, stream)
 				}
 				body = applyCodexRequestMetadataForTarget(to, body, rawJSON)
 				body = applyOpenAIChatCodexRequestDefaults(from, to, body)
 				// Apply Codex target finalization after preservation, summary
 				// mapping, and the last request hook mutation.
-				return finalizeRequestForTarget(to, body, stream)
+				return finalizeRequestForTarget(to, body, stream), updatesChanged
 			}
 		}
 		log.WithError(err).Warnf("oagmsg: request translation %s to %s failed", from, to)
@@ -173,19 +178,52 @@ func translateRequestWithOptionsContext(ctx context.Context, from, to Format, mo
 	if hooks == nil {
 		body = applyCodexRequestMetadataForTarget(to, body, rawJSON)
 		body = applyOpenAIChatCodexRequestDefaults(from, to, body)
-		return finalizeRequestForTarget(to, body, stream)
+		return finalizeRequestForTarget(to, body, stream), false
 	}
-	body = hooks.NormalizeRequest(ctx, from, to, model, body, stream)
+	body, updatesChanged := normalizeRequestWithUpdateTracking(hooks, ctx, from, to, model, body, stream)
 	summaryConfig := thinking.ExtractSummaryConfig(body, from.String())
 	if translated, ok := hooks.TranslateRequest(ctx, from, to, model, body, stream); ok {
 		translated = thinking.ApplySummaryConfigForModel(translated, to.String(), model, summaryConfig)
 		translated = applyCodexRequestMetadataForTarget(to, translated, rawJSON)
 		translated = applyOpenAIChatCodexRequestDefaults(from, to, translated)
-		return finalizeRequestForTarget(to, translated, stream)
+		return finalizeRequestForTarget(to, translated, stream), updatesChanged
 	}
 	body = applyCodexRequestMetadataForTarget(to, body, rawJSON)
 	body = applyOpenAIChatCodexRequestDefaults(from, to, body)
-	return finalizeRequestForTarget(to, body, stream)
+	return finalizeRequestForTarget(to, body, stream), updatesChanged
+}
+
+func normalizeRequestWithUpdateTracking(hooks PluginHooks, ctx context.Context, from, to Format, model string, body []byte, stream bool) ([]byte, bool) {
+	before := requestConfigurationUpdates(body)
+	normalized := hooks.NormalizeRequest(ctx, from, to, model, body, stream)
+	return normalized, requestConfigurationUpdatesChanged(before, requestConfigurationUpdates(normalized))
+}
+
+func requestConfigurationUpdates(body []byte) []string {
+	input := gjson.GetBytes(body, "input")
+	if !input.IsArray() {
+		return nil
+	}
+	updates := make([]string, 0)
+	input.ForEach(func(_, item gjson.Result) bool {
+		if item.Get("type").String() == "configuration_update" {
+			updates = append(updates, item.Raw)
+		}
+		return true
+	})
+	return updates
+}
+
+func requestConfigurationUpdatesChanged(before, after []string) bool {
+	if len(before) != len(after) {
+		return true
+	}
+	for i, item := range before {
+		if item != after[i] {
+			return true
+		}
+	}
+	return false
 }
 
 func restoreGeminiResponsesTextSignaturesForTarget(from, to Format, model string, body []byte) []byte {

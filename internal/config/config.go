@@ -104,6 +104,10 @@ type Config struct {
 
 	// Routing controls credential selection behavior.
 	Routing RoutingConfig `yaml:"routing" json:"routing"`
+	// PreserveNullRouting is set while decoding legacy/v8 layout documents where
+	// a null routing block means "leave defaults implicit" rather than an empty
+	// routing mapping whose strategy should be canonicalized.
+	PreserveNullRouting bool `yaml:"-" json:"-"`
 
 	// WebsocketAuth enables or disables authentication for the WebSocket API.
 	WebsocketAuth bool `yaml:"ws-auth" json:"ws-auth"`

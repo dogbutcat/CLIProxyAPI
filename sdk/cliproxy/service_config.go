@@ -299,8 +299,14 @@ func (s *Service) registerConfigAPIKeyAuths(ctx context.Context, cfg *config.Con
 	}
 
 	registrationCtx := coreauth.WithDeferredAPIKeyModelAliasRebuild(ctx)
+	desiredOpenCodeGoAuths := make(map[string]struct{})
+	for _, auth := range auths {
+		if auth != nil && coreauth.IsConfigAPIKeyAuth(auth) && isOpenCodeGoProvider(auth.Provider) {
+			desiredOpenCodeGoAuths[strings.TrimSpace(auth.ID)] = struct{}{}
+		}
+	}
 	tasks := make([]modelRegistrationTask, 0, len(auths))
-	needsAliasRebuild := false
+	needsAliasRebuild := s.reconcileOpenCodeGoConfigAuths(registrationCtx, desiredOpenCodeGoAuths)
 	for _, auth := range auths {
 		if !coreauth.IsConfigAPIKeyAuth(auth) {
 			continue
@@ -323,6 +329,28 @@ func (s *Service) registerConfigAPIKeyAuths(ctx context.Context, cfg *config.Con
 		s.coreManager.RefreshAPIKeyModelAlias()
 	}
 	s.runModelRegistrationTasks(registrationCtx, tasks)
+}
+
+func (s *Service) reconcileOpenCodeGoConfigAuths(ctx context.Context, desired map[string]struct{}) bool {
+	if s == nil || s.coreManager == nil {
+		return false
+	}
+	removed := false
+	for _, auth := range s.coreManager.List() {
+		if auth == nil || !isOpenCodeGoProvider(auth.Provider) || !coreauth.IsConfigAPIKeyAuth(auth) {
+			continue
+		}
+		id := strings.TrimSpace(auth.ID)
+		if id == "" {
+			continue
+		}
+		if _, keep := desired[id]; keep {
+			continue
+		}
+		s.applyCoreAuthRemoval(ctx, id)
+		removed = true
+	}
+	return removed
 }
 
 func forceHomeRuntimeConfig(cfg *config.Config) {
